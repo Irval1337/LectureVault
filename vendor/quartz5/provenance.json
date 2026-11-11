@@ -1,0 +1,25 @@
+{
+  "version": "5.0.0",
+  "files": {
+    "base.scss": {
+      "source": "https://github.com/jackyzha0/quartz/blob/v5/quartz/styles/base.scss",
+      "sha256": "0dbbe20680bb5fc4a009d92cbcb9b017b947d1760feabf0e5721cc2926c9adfa"
+    },
+    "variables.scss": {
+      "source": "https://github.com/jackyzha0/quartz/blob/v5/quartz/styles/variables.scss",
+      "sha256": "365594b1baf3194f01a4c0bd6763dd5f0f10703346b7207b3613ccc7669f9436"
+    },
+    "callouts.scss": {
+      "source": "https://github.com/jackyzha0/quartz/blob/v5/quartz/styles/callouts.scss",
+      "sha256": "a401f9d27da77cb34215d9497c23c78cdbcd76f09315b4235db0d5778b739727"
+    },
+    "syntax.scss": {
+      "source": "https://github.com/jackyzha0/quartz/blob/v5/quartz/styles/syntax.scss",
+      "sha256": "f76569760f857fe72c23d74c89e8ab83bc3f0db24b453a4d15842a1435bfb66a"
+    },
+    "LICENSE.txt": {
+      "source": "https://github.com/jackyzha0/quartz/blob/v5/LICENSE.txt",
+      "sha256": "3553b1bda6785a2fdb0ccb5f1c93ea0b7969ae1456d0bb734964ae73ef02a1dc"
+    }
+  }
+}

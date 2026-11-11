@@ -1,0 +1,61 @@
+:root {
+  color-scheme: dark;
+  --surface-page: #1c1f23;
+  --surface-rail: #171a1d;
+  --surface-navigation: #23272b;
+  --surface-inspector: #202428;
+  --surface-tab: #252a2f;
+  --surface-raised: #2a3037;
+  --surface-input: #1d2126;
+  --surface-selected: #3b3730;
+  --surface-code: #16191d;
+  --surface-notice: #302c25;
+  --border-default: #353b42;
+  --border-strong: #505963;
+  --text-primary: #e0e2e5;
+  --text-body: #c7cbd2;
+  --text-muted: #adb6c0;
+  --accent: #d9ba7e;
+  --accent-hover: #ead3a9;
+  --success: #a1c5af;
+  --danger: #e5aaaa;
+  --focus-ring: #d9ba7e;
+  --font-ui: 'Inter Variable', Inter, system-ui, sans-serif;
+  --font-reader: 'Source Serif 4 Variable', Georgia, serif;
+  --font-code: 'SFMono-Regular', Consolas, monospace;
+  --ui-size: 13px;
+  --metadata-size: 12px;
+  --reader-size: 17px;
+  --reader-leading: 1.7;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --radius-control: 4px;
+  --radius-dialog: 8px;
+  --rail-width: 44px;
+  --navigator-width: 236px;
+  --inspector-width: 244px;
+  --file-tab-height: 37px;
+  --toolbar-height: 42px;
+  --control-height: 32px;
+  --input-height: 36px;
+  --tree-row-height: 30px;
+  --mobile-target: 44px;
+  --dialog-overlay: #0008;
+  --dialog-shadow: 0 16px 60px #0006;
+  /* Quartz and existing UI aliases share the same semantic theme. */
+  --bodyFont: var(--font-ui); --headerFont: var(--font-ui); --codeFont: var(--font-code);
+  --light: var(--surface-page); --lightgray: var(--border-default);
+  --gray: var(--text-muted); --darkgray: var(--text-body); --dark: var(--text-primary);
+  --secondary: var(--accent); --tertiary: var(--accent-hover);
+  --highlight: var(--surface-selected); --textHighlight: var(--surface-selected);
+  --background: var(--surface-page); --surface: var(--surface-navigation);
+  --raised: var(--surface-raised); --border: var(--border-default);
+  --text: var(--text-primary); --muted: var(--text-muted); --ring: var(--focus-ring);
+}
+
+/* Reader-only light variant; navigation and inspector retain Studio. */
+.reader-light { --surface-page: #fafaf8; --surface-tab: #f0f1ee; --surface-raised: #e8eceb; --surface-selected: #ede3ce; --surface-code: #f0f2ed; --text-primary: #292d2a; --text-body: #3d443f; --text-muted: #69716a; --accent: #806127; --accent-hover: #5c4418; --border-default: #d4d9d1; --border-strong: #aeb8ad; --background: #fafaf8; --border: var(--border-default); --raised: var(--surface-raised); --text: #292d2a; --muted: #69716a; --darkgray: #3d443f; --dark: #292d2a; --light: #fafaf8; --lightgray: #d4d9d1; --secondary: #806127; --tertiary: #5c4418; background: var(--surface-page); color-scheme: light; }

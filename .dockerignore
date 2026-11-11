@@ -1,0 +1,17 @@
+**
+!package.json
+!package-lock.json
+!web/
+!web/**
+web/node_modules/
+web/dist/
+!vendor/
+!vendor/**
+!fixtures/
+!fixtures/**
+!deploy/
+!deploy/**
+**/.env
+**/.env.*
+**/*.log
+**/node_modules/

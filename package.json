@@ -1,0 +1,19 @@
+{
+  "name": "lecturevault",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["web"],
+  "scripts": {
+    "dev": "npm run dev --workspace web --",
+    "build": "npm run build --workspace web",
+    "preview": "npm run preview --workspace web --",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
+  "overrides": { "katex": "^0.19.1" },
+  "devDependencies": {
+    "@playwright/test": "^1.58.0",
+    "vitest": "^4.0.0"
+  }
+}

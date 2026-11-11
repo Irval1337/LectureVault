@@ -1,0 +1,6 @@
+@use "sass:meta";
+
+// Preserve upstream SCSS unchanged; app styles override it without specificity fights.
+@layer quartz {
+  @include meta.load-css("../../../vendor/quartz5/base.scss");
+}
