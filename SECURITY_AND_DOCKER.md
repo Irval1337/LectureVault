@@ -1,96 +1,93 @@
-# LectureVault — Docker, безопасность и границы доверия
+# LectureVault — безопасность и эксплуатация
 
-**Статус:** обязательное дополнение к `PRD.md`, `CODEX_PLAN.md`, `USER_FLOW.md` и текущим промптам. При противоречии по вопросам безопасности это дополнение приоритетнее. Не считать выполнение этого документа подтвержденным до проверки Codex и ручной приемки.
+Актуально17ноября2026. Настоящие аккаунты заменили учебный вход. Подготовлены локальный Compose и production overlay; фактическая публикация, DNS и внешняя почта ещё не настроены владельцем.
 
-## 1. Контекст и цель
+## Границы доверия
 
-LectureVault получает недоверенные видеоссылки, видеофайлы, PDF/PPTX, пользовательские инструкции и Markdown. Backend обрабатывает их с помощью `yt-dlp`, `ffmpeg`, Whisper и локальных Claude/Codex CLI. Несколько пользователей имеют личные и общие документы. Поэтому простой запуск `subprocess` из веб-обработчика, общие каталоги без ACL или публикация mock-auth сервера наружу недопустимы.
+- WebUID101; API/worker/mailer/media/providersUID10001, read-only rootfs, cap_drop ALL, no-new-privileges, лимиты памяти/CPU/PIDs/tmpfs/logs. Docker socket, privileged, host home, личный vault и host CLI profiles не подключаются.
+- Media: отдельная internal-сеть processing, только jobs и собственный RPC secret, без интернета, AI-профилей и базы. ffmpeg/Whisper/Poppler запускаются с Landlock-доступом только к одному заданию, системным бинарникам/моделям и временным файлам.
+- Providers: отдельный broker с UUID-профилями; официальный CLI запускается через Linux Landlock с доступом только к собственным home/work/tmp, системным бинарникам/CA. Не может читать другой профиль, broker encryption key, RPC secret или глобальный `/proc`. ABI3+ проверяется при старте, unsupported kernel отказывает. Broker остаётся доверенным компонентом; это не изоляция от администратора сервера или компрометации самого broker.
+- Worker не имеет auth/SMTP secret или CLI homes; передаёт только ограниченный текст своей задачи. API/mailer имеют собственный auth volume; RPC secrets разделены по сервисам. Mailer имеет SMTP egress; media egress не имеет.
+- Все CLI argv статические, model/provider/effort из server allowlist, prompt через stdin как данные. Shell/eval/произвольных флагов нет. Codex tools отключены immutable catalog/flags, Claude — tools/MCP/settings. Prompt injection не даёт прав на shell/чужие файлы/публикацию.
 
-**Целевое требование:** запуск UI, API и фоновой очереди одним `docker compose up --build`, с persistent-данными и без установки npm/Python-зависимостей на хост. Docker — способ упаковки/частичная граница изоляции, но не гарантия полной безопасности против вредоносных медиафайлов. Контейнеры и хост должны регулярно обновляться.
+## Аккаунты и права
 
-**Особенность существующего пайплайна:** `konspekt` — Bash-функция в `/root/.bashrc` внутри WSL; работает с Whisper/CUDA, Claude/Codex CLI и Obsidian. Нельзя просто запустить ее как бинарник внутри контейнера. Аудит должен установить фактические зависимости, а реализация — создать новый изолированный адаптер, не изменяя `.bashrc`, `hse-notes`, Obsidian и существующие скрипты. При невозможности безопасной контейнеризации CLI допустим **только согласованный** локальный host-runner с явно указанным исключением. Не называть такой режим «полностью в Docker». Не монтировать в контейнер весь `/root`, `~/.config`, каталог аккаунтов CLI, SSH-ключи, Docker socket или Obsidian vault.
+Argon2id64МБ, ограничение параллельного hashing; пароль15–128символов. Email нормализуется, подтверждение24ч и восстановление30мин единоразовые, digest в DB, письмо в outbox зашифровано; успешная отправка стирает payload. Ссылки во fragment URL, не query; API access logs отключены, чувствительный ввод не включается в validation errors. Persistent rate limits по IP/email/action.
 
-## 2. Разделение компонентов
+Opaque session cookie: HttpOnly/SameSite=Strict, в production Secure и __Host prefix без Domain;8ч максимум/2ч бездействия. Пароль/reset/logout-all отзывают сессии. Чувствительные подключения требуют пароль после15мин. Exact Origin/TrustedHost + custom CSRF header; только trusted ingress перезаписывает client IP. API порт наружу не опубликован. TLS/CSP/nosniff/no-referrer защищают браузерную границу. Клиент не получает CLI access/refresh tokens; свой Anthropic API key вводится по HTTPS, хранится encrypted на сервере и не возвращается API/localStorage.
 
-- `web`: собранный React/Vite frontend; только HTTP интерфейс, без API-ключей и прямого исполнения команд.
-- `api`: FastAPI; авторизация, ACL, валидация, загрузка файлов, работа с заметками и задачами. API не запускает долгую обработку синхронно в HTTP-запросе.
-- `worker`: отдельный процесс, который выбирает задания из SQLite, запускает только заранее разрешенные обработчики и записывает результаты/ошибки. Максимум одна задача одновременно для демо.
-- `storage`: persistent volume для SQLite, разрешенных файлов и вложений; изолированные каталоги для каждого job, хранение путей на сервере без доверия к клиентскому имени файла.
-- `cli-runner`: предпочтительно отдельный контейнер/процесс с минимальным доступом; вариант на хосте — только после явно согласованного аудита, без произвольных команд от пользователей.
+Каждый курс/Note/job/asset/export проверяет caller и membership. Owner управляет курсом/ролями; editor пишет документы, viewer только читает/экспортирует. Общий курс не означает публичность и не добавляет людей автоматически. Управление job принадлежит отправителю. Revision409 не перезаписывает черновик. API сериализует изменение подключения и удаление аккаунта; прерванное удаление можно повторить после перезапуска. Публичных/unlisted страниц нет.
 
-Не давать `web` доступ к томам `storage`; ограничивать доступ `worker` только необходимыми входными/выходными каталогами. Для SQLite настроить WAL и `busy_timeout`; исключить конкурентную запись нескольких независимых worker в одном MVP.
+## Недоверенные файлы и лимиты
 
-## 3. Baseline Docker/Compose
+Видео512МБ/2ч, PDF50МБ/100стр с текстом, PNG/JPEG/WebP10МБ; SVG upload/unsafe HTML/внешние embeds запрещены. UUID-имена, signature checks, path confinement/symlink checks, ограничения вывода/страниц/времени, no-root парсеры. До парсинга multipart API проверяет авторизацию, Nginx ограничивает тело. На владельца курса1ГБ assets/5000Note/25МБ Markdown/100курсов, всего10ГБ assets, на отправителя10активных/30новыхjobs в сутки. Финальные квоты перепроверяются транзакцией после upload. Видео/PDF не исполняются. Реальные URL/yt-dlp выключены: SSRF-путь не открыт, обхода через пользовательский endpoint нет.
 
-1. Контейнеры не должны запускаться с `privileged: true`, `network_mode: host`, `pid: host`, Docker socket или `CAP_SYS_ADMIN`. По возможности — non-root UID, `cap_drop: [ALL]`, `no-new-privileges`, read-only root filesystem, отдельные writable volumes/tmpfs.
-2. Ограничить память, CPU, pids, временные файлы, размер логов и параллельность. Предусмотреть таймауты на скачивание/транскрибирование/генерацию, корректное прекращение jobs, очистку временных файлов и состояние `interrupted` после crash.
-3. Для локального MVP пробрасывать web/API **только на `127.0.0.1`**. Сервис с mock-auth/демо-аккаунтами не должен быть доступен из интернета или локальной сети. `PUBLIC_URL`, `CORS` и allowed hosts — без `*` в будущем production режиме.
-4. `api` и `worker` не публикуют лишние порты; внутренние коммуникации — в выделенной сети Compose. Egress worker ограничить максимально возможным способом; Docker network isolation сама по себе **не** обеспечивает блокировку SSRF.
-5. Секреты только на стороне сервера, из непубликуемых `.env`/секретных файлов/credential-store. В репозиторий идет только `.env.example`. Не печатать токены и содержимое личных документов в логи; логировать job id, стадию, длительность, безопасный код ошибки.
-6. `docker compose down` не должен удалять заметки/задачи; `down -v` явно предупреждает об удалении данных. README описывает backup/restore SQLite+assets.
-7. В README — точные команды сборки, локального запуска, остановки и диагностики. Отдельно описать, какая часть реально запускается в Docker, какая зависит от WSL/GPU/авторизации CLI.
+Транскрипт140000символов/PDF40000 не обрезаются молча. Все subprocess имеют timeout/process-group kill и bounded output. CPU Whisper tiny зафиксирован revision/SHA-256; GPU runtime отсутствует и не меняется. Качество длинных записей, OCR, кодеки всех возможных файлов и CUDA не гарантируются.
 
-## 4. Работа с недоверенными URL и файлами
+## Локальный запуск
 
-**URL / yt-dlp**
-- Принимать только `http` и `https`. Не поддерживать `file:`, `ftp:`, `data:`, localhost, loopback, link-local, private и специальные адреса, включая IPv4/IPv6 и нестандартные представления адресов.
-- Защита от SSRF должна действовать на **каждом фактическом сетевом подключении**, включая DNS rebinding и все redirect. Простая проверка строки URL или первоначального DNS-ответа недостаточна. В MVP разумно ограничиться проверенными видеохостингами и явно сообщать, что произвольные URL не гарантируются.
-- Не передавать `yt-dlp` пользовательские flags, cookie jars, пути к конфигам, shell-выражения или произвольные заголовки. Указывать `--ignore-config`; остальные опции — статически заданные сервером. Использовать лимиты времени, размера и числа параллельных загрузок.
-- Если нет надежного сетевого контроля egress, **не включать обработку произвольных внешних URL** в небезопасной многопользовательской версии. Для оценки ИДЗ достаточно проверенного видеофайла и безопасного демо на localhost.
+`docker compose up -d --build` → localhost5180; Mailpit localhost8026 получает только локальные письма. Разработка — localhost5173 после Compose. Порты bind127.0.0.1. Новый namespace lecturevault-service сохраняет старые учебные volumes lecturevault отдельно. Они не удаляются/не копируются в новые аккаунты. `docker compose down` сохраняет данные; `down --volumes` для рабочих volumes не использовать.
 
-**Загрузка файлов**
-- Ограничить максимальный размер HTTP-запроса/файла, количество вложений, допустимые расширения и обнаруженные MIME/сигнатуры. Не считать проверку расширения достаточной.
-- Генерировать случайные серверные имена, никогда не использовать пользовательский filename как путь; защищаться от `../`, абсолютных путей, symlinks, zip-slip и archive bombs при распаковке.
-- Промежуточные файлы — в job-specific directory. Ограничить общий объем диска, процессорное время и размер распакованных файлов/страниц PDF. Не исполнять макросы, скрипты или вложенные программы из документов.
-- Пропускать медиа через обновляемые версии `ffmpeg`/парсеров в изолированном worker. При ошибке сохранять безопасное сообщение, не оригинальный stdout/stderr целиком.
+Dev/test отличаются от production: HTTP cookie без Secure допустим только локально, Mailpit не доставляет внешнюю почту. Mock-job принимается исключительно в LV_ENV=test; development/production его отвергают. `/demo`, seeded accounts/courses и mock-переключатели удалены из рабочего приложения. Существующий browser localStorage не очищается; явный import сохраняет оригинал.
 
-## 5. Запуск локальных CLI и обработка промптов
+## Production с доменом и SMTP
 
-- Никакого `shell=True`, `eval`, `bash -c` со вставленным пользовательским вводом, произвольных команд и произвольных абсолютных путей. `konspekt` как Bash-функция требует отдельной заранее проверенной wrapper-команды; аргументы — валидированные, передаются как `argv`.
-- `Model`, режим и пресет выбираются только из фиксированного списка на сервере. Пользовательские инструкции трактуются как **данные для генерации**, а не системные команды и не право менять инструменты или файлы. CLI запускается только в выделенном рабочем каталоге задания, с минимальными permissions и контролируемым окружением.
-- Не передавать CLI доступ к домашнему каталогу и посторонним репозиториям; по возможности запретить самостоятельные tool calls и запись вне output directory. Учесть, что CLI может получать инструкции из недоверенного видео/слайдов (prompt injection): контент не должен управлять shell, публикацией, секретами или правами.
-- Секреты провайдера не отправляются браузеру и не хранятся в клиентском localStorage. Не требовать от посетителей входа через чужой Codex/Claude аккаунт. Расход ресурсов аккаунта владельца сервера — по заранее заданным квотам.
+Нужны Linux Landlock ABI3+, Docker Compose2.24.4+, достаточный диск/RAM, домен с A/AAAA на сервер, открытые80/443, SMTP с TLS и адрес поддержки. Проверить доступность своего AI-провайдера из региона хостинга. У владельца пока нет домена/SMTP; следующие команды — инструкция для их последующей настройки.
 
-## 6. Пользователи, ACL, публичность
+1. Скопировать `.env.example` в приватный `.env.production`, заполнить LV_DOMAIN, LV_ACME_EMAIL, LV_SUPPORT_EMAIL, LV_SMTP_HOST/PORT/TLS/USER и подтверждённый LV_MAIL_FROM. Для587 — starttls, для465 — ssl. Настроить SPF/DKIM/DMARC у почтового провайдера. Файл исключён из Git; пароли/CLI credentials в него не записывать.
+2. Собрать конфигурацию и инициализировать SMTP secret от UID10001:
 
-- Реальные операции API обязаны проверять авторизацию и права на **каждую** заметку, вложение, курс и job. Нельзя доверять `owner_id`, `workspace_id`, `storage_path`, роли или статусу, присланным клиентом. Проверить защиту от IDOR на последовательных/random id.
-- `private`: только авторизованные участники с разрешением; `unlisted`: секретная ссылка не равна настоящей приватности (в production нужны явная модель токена и revoke); `public`: доступная всем опубликованная заметка после явного действия владельца.
-- `viewer` не может менять документ/вложения; `editor` не может менять владельца/права без соответствующего разрешения. Использовать версии документа/optimistic locking против потери параллельных правок.
-- Все файлы раздаются через проверяемый API, а не прямую публичную папку. В HTML/Markdown рендеринге запрещать unsafe HTML/JS и опасные URL схемы; предотвращать XSS в embed, links и attachments.
-- **Mock login из ИДЗ — строго для локального демо.** Нельзя писать в документации, что такой сайт безопасно развертывается публично. Перед публичным размещением нужны настоящие login/session, cookie `HttpOnly`, `Secure`, `SameSite`, CSRF защита для cookie-auth, rate limiting, политика cookies/CORS, HTTPS и аудит.
+```bash
+docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml config --quiet
+docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml build
+docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml run --rm -it --no-deps api python -m backend.manage smtp-password
+docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml run --rm --no-deps api python -m backend.manage check-config
+```
 
-## 7. Обязательные проверки Codex
+Пароль вводится скрыто и записывается mode0600 в отдельный secret-auth volume. Он не появляется в аргументах, env, Git или browser. `check-config` не заявляет проверку сетевой доступности/доставки SMTP.
 
-1. `docker compose up --build`: открывается localhost UI, API отвечает, demo job проходит; после перезапуска сохраняются заметки, задания и вложения. Если внешний CLI вынесен на хост — это четко обозначено.
-2. Загрузка невалидного типа/чрезмерного размера/неподдерживаемой ссылки завершается контролируемой ошибкой, без зависшего job и без изменения исходных файлов.
-3. Нельзя запросить чужую заметку, исходник видео, вложения и job прямым API-вызовом от пользователя без прав. Проверить доступы `viewer`, `editor`, owner, а не только доступность кнопок.
-4. Никакой пользовательский текст, filename или URL не может быть превращен в аргументы shell, дополнительные флаги `yt-dlp` или путь к произвольному файлу.
-5. Записи в логах не содержат секретов, `env` не попадает в архив, публикация Quartz не запускается без явного подтверждения и не включает приватные страницы.
-6. При рестарте/аварии worker задача не исчезает, появляется безопасная возможность повтора; параллельные задания не ломают данные.
-7. Документировать известные риски, несделанные ограничения и почему локальная mock-auth сборка **не предназначена** для публичного интернета.
+3. После DNS/SMTP и проверки конкретной конфигурации запустить:
 
-## 8. Приоритеты по срокам
+```bash
+docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml up -d --build
+```
 
-**К 11 ноября:** compose для web (и mock-api при необходимости) — желательно, но нельзя жертвовать обязательными PRD/DESIGN/working UI/видео. Никаких реальных чужих данных в демонстрации.
+Production overlay убирает web loopback publish, не запускает Mailpit и публикует только Caddy80/443. Caddy получает настоящий ACME-сертификат и хранит его в persistent TLS volumes. API отказывает без HTTPS canonical origin, email verification, корректных sender/support/TLS SMTP и SMTP secret. Порт1455 не используется. Не выдавать dev-инстанс наружу вместо production overlay.
 
-**К 19 ноября:** compose для UI+API+worker, persistent volume, локальный mock login, основной сквозной сценарий, ограничение загрузок, проверка прав API, безопасный запуск реального pipeline хотя бы для файла. Контроль SSRF и настоящий публичный auth **не объявлять готовыми**, если не реализованы. Если yt-dlp безопасно ограничить не удалось — отключить загрузку по URL для недоверенных пользователей и честно отметить ограничения.
+4. Фактически проверить с внешнего браузера: доверенный сертификат/HTTP→HTTPS, registration/verification, реальное письмо во входящих, recovery, Secure cookie, две независимые учётные записи/ACL, ручную Note/save/reload/export; затем собственный Codex login/короткую генерацию. Проверить логи на delivery_failed, запас диска и сохранность volumes после restart. Локальный test certificate не заменяет эту проверку.
 
-Не внедрять лишние меры формально: сначала audit → threat model → plan → implementation → verification. Применять security к реальным точкам входа; не усложнять первым делом mock-прототип до невозможности завершить ИДЗ.
+Домен, SMTP, почтовая репутация, актуальные юридические тексты оператора и политика хранения/резервного копирования зависят от места публикации. В интерфейсе есть фактическое описание данных и контакт поддержки из конфигурации; соответствие произвольной юрисдикции не объявляется автоматически.
 
-## 9. Реализация итогового этапа, 17 ноября
+## Резервные копии и восстановление
 
-Текущий Compose: web (UID101), API/worker/media и provider-alice/provider-bob (UID10001), read-only rootfs, cap_drop ALL, no-new-privileges, tmpfs/ресурсные лимиты. На host опубликован только web на 127.0.0.1:5180 и OAuth callback 127.0.0.1:1455. CPU Whisper tiny зафиксирован по revision и SHA-256; CUDA не включена, NVIDIA runtime не устанавливался.
+CLI `python -m backend.manage backup --output PATH` и `restore --input PATH` запускается от UID10001. Backup включает SQLite snapshot, assets и jobs; sessions, одноразовые ссылки и outbox очищаются только **в копии**. CLI profiles/SMTP/encryption keys не включаются. Архив содержит приватные документы и password hashes: хранить0600 на шифрованном диске, вне Git и публичного webroot.
 
-Media находится в отдельной internal-сети с worker: не имеет внешней сети, CLI-секретов, данных API и home/vault. CLI-контейнеры получают только собственный профиль и отдельный RPC-секрет, без базы/медиа. Worker передаёт ограниченный транскрипт и текст PDF как недоверенные данные, не путь/команду. Инструменты Codex отключены, user config/rules/skills не загружаются; Claude запускается с пустыми tools/MCP/settings. CLI credentials сохраняются только в profile volume пользователя. Браузерная сессия и CLI OAuth — разные уровни входа.
+Остановить API/worker/mailer, чтобы файлы и DB не менялись. Пример для локального Compose (production — добавить env-file и оба compose-файла ко всем командам):
 
-Codex native browser OAuth: официальный CLI хранит PKCE, API пересылает callback только в fixed loopback CLI-сервер после проверки state. Это не proxy произвольного URL. OAuth query не логируется web/API/runner. Для Claude официальный flow может требовать одноразовый authorization code; access/refresh tokens не передаются UI. Существующие host credentials не используются и не изменяются.
+```bash
+docker compose stop api worker mailer
+docker compose run --rm -T --no-deps -e TMPDIR=/backups -v lecturevault-backups:/backups api python -m backend.manage backup --output /backups/snapshot.tar.gz
+umask 077
+docker compose run --rm -T --no-deps -v lecturevault-backups:/backups api cat /backups/snapshot.tar.gz > ./lecturevault-private-backup.tar.gz
+docker compose start api worker mailer
+```
 
-Фактические лимиты: видео512МБ/2ч, PDF50МБ/100стр с текстом, PNG/JPEG/WebP10МБ, 10 активных jobs пользователя, 3ГБ assets экземпляра; серверные UUID-имена, signature/type checks, path confinement, запрет symlink, квоты проверяются повторно в транзакции после загрузки. Изображения доступны через ACL API, пользовательский SVG/unsafe HTML/внешние embeds запрещены. Real URL/yt-dlp отключены; mock URL не вызывает сеть. Парсеры и CLI ограничены по времени и ресурсам, shell=False/static argv.
+Служебный backup volume содержит приватный архив; перенести копию в выбранное шифрованное хранилище и применять свою политику удаления. Имена snapshot не перезаписываются; для следующего выбирать новый PATH. `TMPDIR=/backups` нужен для больших архивов: обычный runtime tmpfs ограничен. Backup на том же диске не защищает от его потери.
 
-Серверные owner/editor/viewer действуют на Note, job, asset, экспорт и membership. Управление job — только отправителю, чтобы другой участник не расходовал его CLI-профиль повтором. Revision409 не перезаписывает документ; browser draft можно скачать и явно заменить актуальной версией.
+Restore допускается **только в новый Compose project с пустыми data/jobs/profiles/auth volumes**, никогда поверх рабочей системы. Это обязательное условие: старые CLI profiles не должны пережить восстановление аккаунтов. Передать архив в доступный UID10001 `/backups` через отдельный scratch volume, запустить operator CLI с TMPDIR=/backups; он проверяет tar paths/links/devices/size, DB integrity, переписывает server-owned asset roots. Не выполнять распаковку недоверенного архива от root. Для небольших/больших архивов одинаковый способ без host mounts:
 
-**Граница локального демо:** оба профиля выбираются без пароля, поэтому человек с доступом к localhost может войти в любой из них и использовать сохранённый CLI-аккаунт этого профиля. Такая сборка не изолирует людей на одной машине и не предназначена для общего публичного доступа. OAuth CLI не заменяет настоящую авторизацию приложения. Требования реального публичного auth остаются из раздела 6.
+```bash
+docker compose -p lecturevault-restored run --rm -T --no-deps -e TMPDIR=/backups -v lecturevault-restore-scratch:/backups api python -c 'import shutil,sys; from pathlib import Path; from backend.config import Settings; from backend.manage import restore; p=Path("/backups/input.tar.gz"); f=p.open("wb"); shutil.copyfileobj(sys.stdin.buffer,f); f.close(); restore(Settings(),p)' < ./lecturevault-private-backup.tar.gz
+```
 
-Browser-приёмка создаёт новый process-specific Compose project и удаляет только его volumes/images. Рабочие volumes приложения и прежний localStorage не очищаются. Ни секреты, ни media, ни DB не включаются в Git/архив/build context. Успех автоматической mock-приёмки не является доказательством реальной Claude-генерации; проверенный настоящий путь в этом окружении — Whisper + PDF + Codex.
+Не запускать API перед restore: он заполнит пустую базу. После restore настроить новый SMTP secret/домен, поднять новый project на свободном порту. Пользователи восстанавливают пароли через email и подключают AI заново. Незаконченные jobs становятся failed/RESTORED; готовые документы и вложения сохраняются. Старый project/volumes не удаляются. Процедуру регулярно проверять на изолированной копии.
 
-Для Codex дополнительно применяется узкий неизменяемый `runner/codex-models.json`: у трёх разрешённых моделей отключены shell/apply_patch/search/experimental tools и code-mode. Это необходимо, потому что `shell_tool=false` само по себе не отключает apply_patch в CLI 0.169.0. Структура и параметры совместимости сверены с [официальным каталогом CLI 0.169.0](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/models-manager/models.json); инструкции генерации заданы LectureVault. Файл не содержит аккаунтов или credentials и не строится из личного CLI cache. Чужие config/rules/skills не загружаются.
+## Проверки и ограничения доказательств
+
+API-тесты проверяют реальные регистрации/пароли/сессии/ACL/quota/revision/backup. Browser suite создаёт свой process-specific Compose project, настоящие SMTP-письма и synthetic accounts; удаляет только собственные ресурсы. Queue mock разрешён лишь в test. Screenshots/traces в ignored test-results; медиа/DB/secrets/кэши не входят в исходники/build context.
+
+`tests/run_https.py` проверяет production overlay с локальным CA/Caddy, настоящим SMTP AUTH+STARTTLS, __Host Secure cookie, email confirmation, manual Note/reload/logout и HSTS/CSP. Host CA не меняется, публичный ACME/доставляемость не проверяются. Новая Landlock media проверена реальным коротким JFK-фрагментом и синтетическим PDF подUID10001; CLI isolation — чтением своего и запретом соседнего профиля/secrets, запуском официальных CLI/device flow. Реальный Codex full pipeline проверялся на прежнем собственном профиле; чужому/новому аккаунту он не передаётся. Новый полный OAuth/AI-вызов требует личного подтверждения, Claude API — действующего ключа.
+
+Нет обещания абсолютной безопасности или промышленного масштаба: один API-процесс, один worker, SQLite и доверенный CLI broker рассчитаны на небольшой экземпляр. Backups и наблюдение за mail/disk остаются обязанностью оператора; горизонтальное масштабирование и независимый внешний pentest не проводились. Настройки личных инструментов/host CLI не менялись, публикация и push автоматически не выполняются.
+
+Проверка npm17ноября: `npm audit --omit=dev` —0; полный audit —7 high-записей одной транзитивной проблемы picomatch<=4.0.7 в Vite/Vitest/Sass build tooling. Патч ещё не опубликован ([GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)); пользовательские glob patterns не передаются этим инструментам, dev-сервер bind127.0.0.1, в runtime Nginx нет Node/build dependencies. Не применять предложенный audit force-downgrade и не объявлять полный audit чистым; обновить lock после upstream patch.

@@ -12,7 +12,7 @@
     "preview": "npm run preview --workspace web --",
     "test": "vitest run",
     "test:e2e": "python3 tests/run_e2e.py",
-    "test:api": ".venv/bin/python -m pytest tests/test_api.py tests/test_runner.py -q"
+    "test:api": ".venv/bin/python -m pytest tests/test_api.py tests/test_auth.py tests/test_runner.py tests/test_operations.py -q"
   },
   "overrides": {
     "katex": "^0.19.1"

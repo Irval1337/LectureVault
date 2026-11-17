@@ -1,9 +1,21 @@
+name: lecturevault-service
+
+x-environment: &environment
+  LV_ENV: ${LV_ENV:-development}
+  LV_PUBLIC_URL: ${LV_PUBLIC_URL:-http://localhost:5180}
+  LV_VERIFY_EMAIL: "1"
+  LV_SMTP_HOST: ${LV_SMTP_HOST:-mailpit}
+  LV_SMTP_PORT: ${LV_SMTP_PORT:-1025}
+  LV_SMTP_TLS: ${LV_SMTP_TLS:-none}
+  LV_SMTP_USER: ${LV_SMTP_USER:-}
+  LV_SMTP_PASSWORD_FILE: ${LV_SMTP_PASSWORD_FILE:-}
+  LV_MAIL_FROM: ${LV_MAIL_FROM:-LectureVault <noreply@localhost>}
+  LV_MOCK_SECONDS: ${LV_MOCK_SECONDS:-6}
+
 x-app: &app
-  build:
-    context: .
-    dockerfile: deploy/Dockerfile.api
-    target: api
+  build: {context: ., dockerfile: deploy/Dockerfile.api, target: api}
   user: "10001:10001"
+  init: true
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
@@ -11,29 +23,19 @@ x-app: &app
   pids_limit: 128
   mem_limit: 1g
   cpus: 2
-  logging:
-    driver: json-file
-    options: {max-size: "5m", max-file: "2"}
+  logging: {driver: json-file, options: {max-size: "5m", max-file: "2"}}
 
 services:
   web:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.web
-    ports:
-      - "127.0.0.1:${LECTUREVAULT_PORT:-5180}:8080"
-      - "127.0.0.1:${LECTUREVAULT_AUTH_PORT:-1455}:1455"
+    build: {context: ., dockerfile: deploy/Dockerfile.web}
+    ports: ["127.0.0.1:${LECTUREVAULT_PORT:-5180}:8080"]
     networks: [private, frontend]
-    depends_on:
-      api: {condition: service_healthy}
+    depends_on: {api: {condition: service_healthy}}
     user: "101:101"
     read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=32m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     mem_limit: 128m
     cpus: 0.5
     pids_limit: 100
@@ -44,14 +46,11 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
-    logging:
-      driver: json-file
-      options:
-        max-size: "5m"
-        max-file: "2"
+    logging: {driver: json-file, options: {max-size: "5m", max-file: "2"}}
   api:
     <<: *app
-    volumes: ["data:/data", "jobs:/jobs", "secret-media:/secrets/media", "secret-alice:/secrets/alice", "secret-bob:/secrets/bob"]
+    environment: *environment
+    volumes: ["data:/data", "jobs:/jobs", "secret-media:/secrets/media", "secret-providers:/secrets/providers", "secret-auth:/secrets/auth"]
     tmpfs: ["/tmp:rw,noexec,nosuid,size=650m"]
     networks: [private, accounts]
     healthcheck:
@@ -62,61 +61,69 @@ services:
       start_period: 10s
   worker:
     <<: *app
-    environment: {LV_MOCK_SECONDS: "${LV_MOCK_SECONDS:-6}"}
+    environment: *environment
     command: ["python", "-m", "backend.worker"]
-    volumes: ["data:/data", "jobs:/jobs", "secret-media:/secrets/media:ro", "secret-alice:/secrets/alice:ro", "secret-bob:/secrets/bob:ro"]
+    volumes: ["data:/data", "jobs:/jobs", "secret-media:/secrets/media:ro", "secret-providers:/secrets/providers:ro"]
     tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
     networks: [processing, accounts]
-    depends_on:
-      api: {condition: service_healthy}
+    depends_on: {api: {condition: service_healthy}}
+  mailer:
+    <<: *app
+    environment: *environment
+    command: ["python", "-m", "backend.mailer"]
+    volumes: ["data:/data", "secret-auth:/secrets/auth:ro"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    networks: [private, mail]
+    mem_limit: 256m
+    depends_on: {api: {condition: service_healthy}}
   media:
     <<: *app
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.api
-      target: media
+    build: {context: ., dockerfile: deploy/Dockerfile.api, target: media}
     volumes: ["jobs:/jobs", "secret-media:/secrets:ro"]
     tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
     networks: [processing]
     mem_limit: 3g
     cpus: 4
-    pids_limit: 128
-  provider-alice:
+  providers:
     <<: *app
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.providers
-    environment: {PROFILE_USER: alice}
-    volumes: ["profile-alice:/home/lecturevault", "secret-alice:/secrets:ro"]
-    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m", "/work:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"]
-    networks: [accounts, provider]
-    mem_limit: 1g
-  provider-bob:
-    <<: *app
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.providers
-    environment: {PROFILE_USER: bob}
-    volumes: ["profile-bob:/home/lecturevault", "secret-bob:/secrets:ro"]
-    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m", "/work:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"]
-    networks: [accounts, provider]
-    mem_limit: 1g
+    build: {context: ., dockerfile: deploy/Dockerfile.providers}
+    volumes: ["profiles:/profiles", "secret-providers:/secrets:ro"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m", "/work:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"]
+    networks: [accounts, provider-egress]
+    mem_limit: 1536m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    depends_on: {api: {condition: service_healthy}}
+  mailpit:
+    image: axllent/mailpit@sha256:23a2ef85bc50853ab3093645d1d64679afd8887e89da5e48a88940c172591a4e
+    user: "10001:10001"
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
+    environment: {MP_DATABASE: /tmp/mailpit.db, MP_MAX_MESSAGES: "200"}
+    ports: ["127.0.0.1:${LECTUREVAULT_MAIL_PORT:-8026}:8025"]
+    networks: [private, frontend]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 192m
+    pids_limit: 64
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: "2m", max-file: "2"}}
 
 volumes:
   data:
   jobs:
   secret-media:
-  secret-alice:
-  secret-bob:
-  profile-alice:
-  profile-bob:
+  secret-providers:
+  secret-auth:
+  profiles:
 
 networks:
-  private:
-    internal: true
-  provider:
+  private: {internal: true}
+  accounts: {internal: true}
+  processing: {internal: true}
   frontend:
-  processing:
-    internal: true
-  accounts:
-    internal: true
+  mail:
+  provider-egress:

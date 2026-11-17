@@ -511,3 +511,40 @@ svg { flex-shrink: 0; }
 .provider-heading > div { display: grid; gap: 4px; }
 .provider-heading > div > span { color: var(--text-muted); font-size: 13px; }
 .account-signout { border-top: 1px solid var(--border); padding-top: 16px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; font-size: 13px; color: var(--text-muted); }
+.auth-form { display: grid; gap: 16px; margin-top: 24px; }
+.auth-form input, .settings-form input, .provider-key-form input { width: 100%; }
+.auth-form > .button { justify-self: start; margin-top: 4px; }
+.auth-links { display: flex; gap: 12px 20px; flex-wrap: wrap; font-size: 13px; margin-top: 24px; }
+.auth-notice { font-size: 13px; color: var(--success); line-height: 1.6; }
+.privacy-link { display: inline-block; color: var(--text-muted); font-size: 12px; margin-top: 24px; }
+.privacy-page { max-width: 820px; padding: 40px 24px; margin: auto; font-size: 15px; line-height: 1.8; }
+.privacy-page h1 { font: 32px var(--font-reader); margin: 32px 0 24px; }
+.privacy-page h2 { font-size: 18px; margin: 24px 0 12px; }
+.settings-page { max-width: 760px; }
+.settings-section { padding: 0 0 24px; margin: 0 0 28px; border-bottom: 1px solid var(--border-default); scroll-margin-top: 96px; }
+.settings-section > h2 { font-size: 17px; margin: 0 0 16px; }
+.settings-email { color: var(--text-muted); margin-bottom: 16px; overflow-wrap: anywhere; }
+.settings-form { display: grid; gap: 10px; max-width: 420px; }
+.settings-form .button { justify-self: start; margin-top: 6px; }
+.settings-session-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+.settings-section .provider-row { padding: 18px 0; }
+.provider-row .field-hint { margin: 10px 0; }
+.provider-key-form { display: grid; gap: 8px; max-width: 480px; }
+.provider-key-form .button { justify-self: start; margin-top: 4px; }
+.device-code-row { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; }
+.device-code { font-size: 22px; letter-spacing: 2px; color: var(--text-primary); user-select: all; }
+.connection-help { margin-top: 16px; color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+.connection-help summary, .account-removal summary { cursor: pointer; }
+.account-removal { color: var(--danger); font-size: 13px; }
+.account-removal p { color: var(--text-muted); margin: 16px 0; line-height: 1.6; }
+.member-identity { min-width: 0; overflow-wrap: anywhere; }
+.member-identity small { display: block; color: var(--text-muted); font-size: 12px; margin-top: 5px; }
+.member-invite { display: grid; gap: 10px; margin: 20px 0; }
+.member-invite .button { justify-self: start; }
+@media (max-width: 767px) {
+  .session-page { padding: 32px 20px; align-items: start; }
+  .settings-section { scroll-margin-top: 90px; }
+  .provider-heading { gap: 16px; }
+  .device-code { font-size: 20px; }
+  .settings-form .button, .provider-key-form .button { min-height: 44px; }
+}

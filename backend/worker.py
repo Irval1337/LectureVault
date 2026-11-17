@@ -28,7 +28,9 @@ def set_stage(settings, job_id, status):
 
 def rpc(settings, service, endpoint, body, timeout=3600):
     try:
-        scope = 'media' if service == settings.media_url else 'alice' if service == settings.provider_alice else 'bob'
+        scope = 'media' if service == settings.media_url else 'providers'
+        if service not in [settings.media_url, settings.providers_url]:
+            raise JobError('INVALID_RUNNER', 'Недопустимый адрес обработчика.')
         response = httpx.post(service + endpoint, json=body, timeout=timeout, trust_env=False, headers={'X-Runner-Key': (settings.secrets / scope / 'runner-key').read_text()})
         if response.status_code != 200:
             detail = response.json().get('detail', {})
@@ -46,6 +48,8 @@ def run_job(settings, row):
     try:
         set_stage(settings, job_id, 'acquiring')
         if job['mode'] == 'mock':
+            if settings.environment != 'test':
+                raise JobError('MOCK_DISABLED', 'Демонстрационная обработка отключена.')
             for stage in STAGES:
                 set_stage(settings, job_id, stage)
                 time.sleep(settings.mock_seconds / len(STAGES))
@@ -75,6 +79,12 @@ def run_job(settings, row):
             if existing:
                 note_id = existing['id']
             else:
+                owner = db.execute('SELECT owner_id FROM courses WHERE id=?', (job['courseId'],)).fetchone()
+                if not owner:
+                    raise JobError('COURSE_MISSING', 'Курс удалён.')
+                usage = db.execute('SELECT count(*),coalesce(sum(length(CAST(n.markdown AS BLOB))),0) FROM notes n JOIN courses c ON c.id=n.course_id WHERE c.owner_id=?', (owner['owner_id'],)).fetchone()
+                if usage[0] >= 5000 or usage[1] + len(markdown.encode()) > 25 * 1024 * 1024:
+                    raise JobError('NOTE_QUOTA', 'Лимит заметок владельца курса исчерпан. Удалите ненужные заметки и повторите.')
                 db.execute('INSERT INTO notes VALUES (?,?,?,?,?,?,?,?,?,?)', (note_id, job['courseId'], job['title'], markdown, 'generated', 1, now(), now(), job_id, int(job['mode'] == 'mock')))
             db.execute("UPDATE jobs SET status='ready',completed_at=?,note_id=?,error=NULL,error_code=NULL WHERE id=?", (now(), note_id, job_id))
         log.info('job=%s stage=ready', job_id)

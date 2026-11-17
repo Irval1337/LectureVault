@@ -4,7 +4,9 @@ import os
 import re
 import secrets
 import time
+import threading
 from contextlib import asynccontextmanager
+from functools import wraps
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote, urlparse
@@ -14,10 +16,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 
-from .config import Settings, USERS
+from .config import Settings
 from .db import connect, course_json, initialize, job_json, note_json, now, uid
 from .providers import CATALOG, valid_options
+from .auth import install_auth, public_user, email_address, throttle, PasswordInput, password_matches
 
 
 class CourseInput(BaseModel):
@@ -63,11 +67,18 @@ def create_app(settings: Settings | None = None):
 
     @asynccontextmanager
     async def lifespan(_app):
+        if settings.production and settings.smtp_user and not Path(settings.smtp_password_file).is_file():
+            raise RuntimeError('Configure SMTP secret before starting production')
         initialize(settings)
+        # A crash during the external profile purge must not lock the account
+        # permanently. DB erasure itself is transactional; an incomplete request
+        # is retried explicitly by the owner after restart.
+        with connect(settings) as db:
+            db.execute('UPDATE users SET disabled=0 WHERE disabled=2')
         yield
 
     app = FastAPI(title='LectureVault', lifespan=lifespan, docs_url=None, redoc_url=None)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=['localhost', '127.0.0.1', 'api', 'testserver'])
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=['api', '127.0.0.1', 'localhost', urlparse(settings.public_url).hostname, *([] if settings.production else ['testserver'])])
 
     @app.middleware('http')
     async def boundaries(request: Request, call_next):
@@ -75,7 +86,7 @@ def create_app(settings: Settings | None = None):
             if request.headers.get('x-lecturevault') != '1':
                 return JSONResponse({'detail': 'Отсутствует заголовок защиты запроса.'}, status_code=403)
             origin = request.headers.get('origin')
-            if origin and (urlparse(origin).hostname not in ['localhost', '127.0.0.1']):
+            if origin and origin not in settings.origins:
                 return JSONResponse({'detail': 'Недопустимый origin.'}, status_code=403)
         try:
             length = int(request.headers.get('content-length', '0'))
@@ -84,22 +95,43 @@ def create_app(settings: Settings | None = None):
         limit = 6 * 1024 * 1024 if request.headers.get('content-type', '').startswith('application/json') else 565 * 1024 * 1024
         if length > limit:
             return JSONResponse({'detail': 'Запрос превышает допустимый размер.'}, status_code=413)
+        public_auth = {'/api/auth/register', '/api/auth/login', '/api/auth/logout', '/api/auth/verify-email', '/api/auth/resend-verification', '/api/auth/forgot-password', '/api/auth/reset-password'}
+        if request.method in ['POST', 'PUT', 'PATCH', 'DELETE'] and request.url.path not in public_auth:
+            try:
+                user(request)  # Reject unauthenticated uploads before multipart parsing/spooling.
+            except HTTPException as error:
+                return JSONResponse({'detail': error.detail}, status_code=error.status_code)
         response = await call_next(request)
         response.headers['Cache-Control'] = 'no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         return response
 
-    def user(lv_session: str | None = Cookie(default=None)):
-        if not lv_session:
-            raise HTTPException(401, 'Войдите в демо-аккаунт.')
-        with connect(settings) as db:
-            row = db.execute('SELECT * FROM sessions WHERE digest=? AND expires>?', (hashlib.sha256(lv_session.encode()).hexdigest(), now())).fetchone()
-        if not row:
-            raise HTTPException(401, 'Сессия истекла. Войдите снова.')
-        return row['user_id']
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(_request, error):
+        field = next((str(e['loc'][-1]) for e in error.errors() if e.get('loc')), '')
+        return JSONResponse({'detail': {'field': field, 'message': 'Проверьте введённые данные и допустимую длину полей.'}}, status_code=422)
+
+    user, recent_user = install_auth(app, settings)
+    account_locks = {}
+    account_locks_guard = threading.Lock()
+
+    def account_action(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            identity = kwargs['user_id']
+            with account_locks_guard:
+                lock = account_locks.setdefault(identity, threading.RLock())
+            with lock:
+                with connect(settings) as db:
+                    if not db.execute('SELECT 1 FROM users WHERE id=? AND disabled=0', (identity,)).fetchone():
+                        raise HTTPException(401, 'Войдите в аккаунт.')
+                return function(*args, **kwargs)
+        return wrapped
 
     def access(db, course_id, user_id, write=False, owner=False):
-        course = db.execute('SELECT * FROM courses WHERE id=?', (course_id,)).fetchone()
+        if not db.execute('SELECT 1 FROM users WHERE id=? AND disabled=0', (user_id,)).fetchone():
+            raise HTTPException(401, 'Войдите в аккаунт.')
+        course = db.execute('SELECT c.* FROM courses c JOIN users u ON u.id=c.owner_id AND u.disabled=0 WHERE c.id=?', (course_id,)).fetchone()
         role = None
         if course:
             if course['owner_id'] == user_id:
@@ -126,49 +158,13 @@ def create_app(settings: Settings | None = None):
     def health():
         with connect(settings) as db:
             db.execute('SELECT 1')
-        return {'ok': True, 'mode': 'local-demo'}
-
-    @app.get('/api/auth')
-    def auth_info(lv_session: str | None = Cookie(default=None)):
-        current = None
-        if lv_session:
-            try:
-                current = next(u for u in USERS if u['id'] == user(lv_session))
-            except HTTPException:
-                pass
-        return {'users': USERS, 'user': current}
-
-    login_attempts: dict[str, list[float]] = {}
-
-    @app.post('/api/auth/login')
-    def login(body: dict, request: Request, response: Response):
-        key = request.client.host if request.client else 'local'
-        attempts = [t for t in login_attempts.get(key, []) if t > time.monotonic() - 60]
-        if len(attempts) >= 30:
-            raise HTTPException(429, 'Слишком много попыток входа. Подождите минуту.')
-        login_attempts[key] = [*attempts, time.monotonic()]
-        if body.get('userId') not in [u['id'] for u in USERS]:
-            raise HTTPException(400, 'Выберите демопользователя.')
-        token = secrets.token_urlsafe(40)
-        with connect(settings) as db:
-            db.execute('DELETE FROM sessions WHERE expires<?', (now(),))
-            db.execute('INSERT INTO sessions VALUES (?,?,?)', (hashlib.sha256(token.encode()).hexdigest(), body['userId'], now() + 8 * 3600 * 1000))
-        response.set_cookie('lv_session', token, httponly=True, samesite='strict', max_age=8 * 3600, path='/')
-        return {'user': next(u for u in USERS if u['id'] == body['userId'])}
-
-    @app.post('/api/auth/logout')
-    def logout(response: Response, lv_session: str | None = Cookie(default=None)):
-        if lv_session:
-            with connect(settings) as db:
-                db.execute('DELETE FROM sessions WHERE digest=?', (hashlib.sha256(lv_session.encode()).hexdigest(),))
-        response.delete_cookie('lv_session', path='/')
         return {'ok': True}
 
     @app.get('/api/state')
     def state(user_id=Depends(user)):
         with connect(settings) as db:
             courses = []
-            for row in db.execute('SELECT * FROM courses ORDER BY created_at'):
+            for row in db.execute("SELECT c.* FROM courses c JOIN users u ON u.id=c.owner_id AND u.disabled=0 WHERE c.owner_id=? OR (c.workspace='shared' AND c.id IN (SELECT course_id FROM members WHERE user_id=?)) ORDER BY c.created_at", (user_id, user_id)):
                 try:
                     _, role = access(db, row['id'], user_id)
                     courses.append(course_json(row, role))
@@ -176,12 +172,13 @@ def create_app(settings: Settings | None = None):
                     continue
             ids = [c['id'] for c in courses]
             marks = ','.join('?' for _ in ids) or 'NULL'
-            notes = [note_json(row) for row in db.execute(f'SELECT * FROM notes WHERE course_id IN ({marks}) ORDER BY created_at', ids)]
+            notes = [dict(id=row['id'], courseId=row['course_id'], title=row['title'], markdown='', contentLoaded=False, origin=row['origin'], revision=row['revision'], createdAt=row['created_at'], updatedAt=row['updated_at'], jobId=row['job_id'], isMock=bool(row['is_mock'])) for row in db.execute(f'SELECT id,course_id,title,origin,revision,created_at,updated_at,job_id,is_mock FROM notes WHERE course_id IN ({marks}) ORDER BY created_at', ids)]
             jobs = [job_json(row) for row in db.execute(f'SELECT * FROM jobs WHERE course_id IN ({marks}) ORDER BY created_at', ids)]
         return {'version': 1, 'courses': courses, 'notes': notes, 'jobs': jobs}
 
     @app.get('/api/providers')
     def providers(user_id=Depends(user)):
+        throttle(settings, 'providers-status:' + user_id, 90, 60)
         from .worker import JobError, rpc
         try:
             return rpc(settings, settings.provider_url(user_id), '/providers/status', {'userId': user_id}, timeout=35)
@@ -189,34 +186,24 @@ def create_app(settings: Settings | None = None):
             return {'providers': [{**p, 'connected': False, 'login': {'status': 'unavailable'}} for p in CATALOG]}
 
     @app.post('/api/providers/{provider}/{action}')
-    def provider_action(provider: Literal['codex', 'claude'], action: Literal['connect', 'code', 'disconnect'], body: dict, user_id=Depends(user)):
+    @account_action
+    def provider_action(provider: Literal['codex', 'claude'], action: Literal['connect', 'key', 'disconnect'], body: dict, user_id=Depends(recent_user)):
         from .worker import JobError, rpc
         payload = {'userId': user_id, 'provider': provider}
-        if action == 'code':
-            code = body.get('code')
-            if not isinstance(code, str) or not 4 <= len(code) <= 1000:
-                raise HTTPException(422, 'Введите код подтверждения с официальной страницы провайдера.')
-            payload['code'] = code
+        throttle(settings, 'provider-action:' + user_id, 20, 900)
+        if action == 'key':
+            key = body.get('apiKey')
+            if provider != 'claude' or not isinstance(key, str) or not 20 <= len(key) <= 512:
+                raise HTTPException(422, 'Введите ключ Anthropic API.')
+            payload['apiKey'] = key
         try:
-            return rpc(settings, settings.provider_url(user_id), f'/providers/{action}', payload, timeout=30)
+            result = rpc(settings, settings.provider_url(user_id), f'/providers/{action}', payload, timeout=30)
+            if action in ['connect', 'key']:
+                with connect(settings) as db:
+                    db.execute('INSERT OR IGNORE INTO provider_links VALUES (?)', (user_id,))
+            return result
         except JobError as error:
             raise HTTPException(502, error.message) from None
-
-    @app.get('/api/providers/codex/callback')
-    def codex_callback(request: Request):
-        from .worker import JobError, rpc
-        if len(request.url.query) > 12000:
-            raise HTTPException(400, 'Invalid callback')
-        payload = dict(request.query_params)
-        if not payload.get('state') or not (payload.get('code') or payload.get('error')):
-            raise HTTPException(400, 'Invalid callback')
-        for account in USERS:
-            try:
-                rpc(settings, settings.provider_url(account['id']), '/providers/callback', payload, timeout=35)
-                return HTMLResponse('<!doctype html><html lang="ru"><meta charset="utf-8"><title>LectureVault</title><p>Вход подтверждён. Вернитесь в LectureVault.</p></html>', headers={'Referrer-Policy': 'no-referrer'})
-            except JobError:
-                continue
-        raise HTTPException(400, 'Вход не подтверждён. Начните подключение заново в LectureVault.')
 
     @app.post('/api/courses', status_code=201)
     def create_course(body: CourseInput, user_id=Depends(user)):
@@ -224,27 +211,55 @@ def create_app(settings: Settings | None = None):
         if not title:
             raise HTTPException(422, 'Введите название курса.')
         with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT count(*) FROM courses WHERE owner_id=?', (user_id,)).fetchone()[0] >= 100:
+                raise HTTPException(422, 'Не более 100 собственных курсов.')
             if db.execute('SELECT 1 FROM courses WHERE owner_id=? AND workspace=? AND lower(title)=lower(?)', (user_id, body.workspace, title)).fetchone():
                 raise HTTPException(409, 'Курс с таким названием уже существует.')
             course_id = uid()
             db.execute('INSERT INTO courses VALUES (?,?,?,?,?)', (course_id, title, body.workspace, user_id, now()))
-            if body.workspace == 'shared':
-                db.execute('INSERT INTO members VALUES (?,?,?)', (course_id, 'bob' if user_id == 'alice' else 'alice', 'editor'))
         return {'id': course_id}
 
     @app.get('/api/courses/{course_id}/members')
     def members(course_id: str, user_id=Depends(user)):
         with connect(settings) as db:
             course, _ = access(db, course_id, user_id)
-            rows = {r['user_id']: r['role'] for r in db.execute('SELECT * FROM members WHERE course_id=?', (course_id,))}
-        return [{**u, 'role': 'owner' if u['id'] == course['owner_id'] else rows.get(u['id'], 'none')} for u in USERS]
+            rows = db.execute("SELECT u.*,CASE WHEN u.id=? THEN 'owner' ELSE m.role END AS role FROM users u LEFT JOIN members m ON m.user_id=u.id AND m.course_id=? WHERE u.id=? OR m.user_id IS NOT NULL", (course['owner_id'], course_id, course['owner_id'])).fetchall()
+        return [{**public_user(row), 'role': row['role']} for row in rows]
+
+    @app.post('/api/courses/{course_id}/members')
+    def add_member(course_id: str, body: dict, user_id=Depends(user)):
+        email = email_address(body.get('email', ''))
+        role = body.get('role', 'viewer')
+        if role not in ['editor', 'viewer']:
+            raise HTTPException(422, 'Выберите роль участника.')
+        throttle(settings, 'invite:' + user_id, 30, 3600)
+        with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
+            course, _ = access(db, course_id, user_id, owner=True)
+            if course['workspace'] != 'shared':
+                raise HTTPException(422, 'Участников можно добавить только в общий курс.')
+            member = db.execute('SELECT * FROM users WHERE email=? AND verified=1 AND disabled=0', (email,)).fetchone()
+            if not member:
+                raise HTTPException(404, 'Не удалось добавить участника. Проверьте email: пользователь должен зарегистрироваться и подтвердить его.')
+            if member['id'] == user_id:
+                raise HTTPException(409, 'Вы уже владелец курса.')
+            if db.execute('SELECT 1 FROM members WHERE course_id=? AND user_id=?', (course_id, member['id'])).fetchone():
+                raise HTTPException(409, 'Участник уже добавлен.')
+            if db.execute('SELECT count(*) FROM members WHERE course_id=?', (course_id,)).fetchone()[0] >= 100:
+                raise HTTPException(422, 'Не более 100 участников курса.')
+            db.execute('INSERT INTO members VALUES (?,?,?)', (course_id, member['id'], role))
+        return {'ok': True}
 
     @app.put('/api/courses/{course_id}/members/{member_id}')
     def membership(course_id: str, member_id: str, body: dict, user_id=Depends(user)):
         with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
             course, _ = access(db, course_id, user_id, owner=True)
-            if course['workspace'] != 'shared' or member_id == course['owner_id'] or member_id not in [u['id'] for u in USERS] or body.get('role') not in ['editor', 'viewer', 'none']:
+            if course['workspace'] != 'shared' or member_id == course['owner_id'] or body.get('role') not in ['editor', 'viewer', 'none']:
                 raise HTTPException(422, 'Недопустимое изменение роли.')
+            if not db.execute('SELECT 1 FROM members WHERE course_id=? AND user_id=?', (course_id, member_id)).fetchone():
+                raise HTTPException(404, 'Участник не найден.')
             db.execute('DELETE FROM members WHERE course_id=? AND user_id=?', (course_id, member_id))
             if body['role'] != 'none':
                 db.execute('INSERT INTO members VALUES (?,?,?)', (course_id, member_id, body['role']))
@@ -255,7 +270,9 @@ def create_app(settings: Settings | None = None):
         if not body.title.strip():
             raise HTTPException(422, 'Введите название заметки.')
         with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
             access(db, body.courseId, user_id, write=True)
+            check_note_quota(db, body.courseId, body.markdown)
             note_id = uid()
             db.execute('INSERT INTO notes VALUES (?,?,?,?,?,?,?,?,?,?)', (note_id, body.courseId, body.title.strip(), body.markdown, 'manual', 1, now(), now(), None, 0))
             result = note_json(db.execute('SELECT * FROM notes WHERE id=?', (note_id,)).fetchone())
@@ -271,7 +288,9 @@ def create_app(settings: Settings | None = None):
         if not body.title.strip():
             raise HTTPException(422, 'Введите название заметки.')
         with connect(settings) as db:
-            entity(db, 'notes', note_id, user_id, write=True)
+            db.execute('BEGIN IMMEDIATE')
+            row = entity(db, 'notes', note_id, user_id, write=True)
+            check_note_quota(db, row['course_id'], body.markdown, replacing=note_id)
             result = db.execute('UPDATE notes SET title=?,markdown=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=?', (body.title.strip(), body.markdown, now(), note_id, body.revision))
             if result.rowcount != 1:
                 raise HTTPException(409, 'Документ уже изменён. Черновик сохранён; откройте актуальную версию перед повторным сохранением.')
@@ -336,7 +355,7 @@ def create_app(settings: Settings | None = None):
             with connect(settings) as db:
                 db.execute('BEGIN IMMEDIATE')
                 entity(db, 'notes', note_id, user_id, write=True)
-                check_quota(db, item[4])
+                check_quota(db, user_id, item[4], course_id)
                 db.execute('INSERT INTO assets VALUES (?,?,?,?,?,?,?,?)', (item[0], course_id, note_id, None, *item[1:]))
         except BaseException:
             Path(item[3]).unlink(missing_ok=True)
@@ -353,24 +372,37 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, 'Файл недоступен.')
         return FileResponse(path, media_type=row['mime'], filename=row['name'], content_disposition_type='inline' if row['mime'].startswith('image/') else 'attachment')
 
-    def check_quota(db, added=0):
-        if db.execute('SELECT coalesce(sum(size),0) FROM assets').fetchone()[0] + added > 3 * 1024**3:
-            raise HTTPException(507, 'Лимит локального хранилища 3 ГБ исчерпан.')
+    def check_quota(db, user_id, added=0, course_id=None):
+        charged = db.execute('SELECT owner_id FROM courses WHERE id=?', (course_id,)).fetchone()['owner_id'] if course_id else user_id
+        used = db.execute('SELECT coalesce(sum(a.size),0) FROM assets a JOIN courses c ON c.id=a.course_id WHERE c.owner_id=?', (charged,)).fetchone()[0]
+        if used + added > settings.user_quota:
+            raise HTTPException(507, 'Лимит хранилища владельца курса исчерпан. Удалите ненужные материалы.')
+        if db.execute('SELECT coalesce(sum(size),0) FROM assets').fetchone()[0] + added > settings.total_quota:
+            raise HTTPException(507, 'Хранилище сервиса заполнено. Повторите попытку позже.')
+
+    def check_note_quota(db, course_id, markdown, replacing=None):
+        owner = db.execute('SELECT owner_id FROM courses WHERE id=?', (course_id,)).fetchone()['owner_id']
+        used = db.execute('SELECT count(*),coalesce(sum(length(CAST(n.markdown AS BLOB))),0) FROM notes n JOIN courses c ON c.id=n.course_id WHERE c.owner_id=? AND n.id!=?', (owner, replacing or '')).fetchone()
+        if used[0] >= 5000 or used[1] + len(markdown.encode()) > 25 * 1024 * 1024:
+            raise HTTPException(507, 'Лимит заметок владельца курса исчерпан. Удалите ненужные заметки.')
 
     @app.post('/api/jobs', status_code=201)
     async def create_job(metadata: str = Form(max_length=12000), video: UploadFile | None = File(default=None), pdf: UploadFile | None = File(default=None), user_id=Depends(user)):
         try:
             body = JobInput.model_validate_json(metadata)
+            if body.mode == 'mock' and settings.environment != 'test':
+                raise HTTPException(422, 'Демонстрационная обработка отключена.')
         except ValueError:
             raise HTTPException(422, 'Проверьте параметры задания.')
         if not body.title.strip():
             raise HTTPException(422, 'Введите название конспекта.')
+        throttle(settings, 'jobs-day:' + user_id, 30, 86400)
         with connect(settings) as db:
             access(db, body.courseId, user_id, write=True)
             count = db.execute("SELECT count(*) FROM jobs WHERE status NOT IN ('ready','failed','cancelled') AND created_by=?", (user_id,)).fetchone()[0]
             if count >= 10:
                 raise HTTPException(429, 'Не более 10 активных заданий на пользователя.')
-            check_quota(db)
+            check_quota(db, user_id, course_id=body.courseId)
         if body.sourceType == 'url':
             if body.mode == 'real':
                 raise HTTPException(422, 'Обработка URL отключена. Загрузите локальный видеофайл.')
@@ -406,7 +438,7 @@ def create_app(settings: Settings | None = None):
                 access(db, body.courseId, user_id, write=True)
                 if db.execute("SELECT count(*) FROM jobs WHERE status NOT IN ('ready','failed','cancelled') AND created_by=?", (user_id,)).fetchone()[0] >= 10:
                     raise HTTPException(429, 'Не более 10 активных заданий на пользователя.')
-                check_quota(db, sum(item[4] for item in assets))
+                check_quota(db, user_id, sum(item[4] for item in assets), body.courseId)
                 db.execute('INSERT INTO jobs(id,course_id,created_by,payload,status,created_at) VALUES (?,?,?,?,?,?)', (job_id, body.courseId, user_id, json.dumps(payload, ensure_ascii=False), 'queued', now()))
                 for item in assets:
                     db.execute('INSERT INTO assets VALUES (?,?,?,?,?,?,?,?)', (item[0], body.courseId, None, job_id, *item[1:]))
@@ -452,6 +484,8 @@ def create_app(settings: Settings | None = None):
         with connect(settings) as db:
             if db.execute('SELECT 1 FROM imports WHERE user_id=? AND digest=?', (user_id, digest)).fetchone():
                 return {'imported': 0}
+            if db.execute('SELECT count(*) FROM courses WHERE owner_id=?', (user_id,)).fetchone()[0] + len(courses) > 100:
+                raise HTTPException(422, 'Не более 100 собственных курсов.')
             mapping = {}
             for c in courses:
                 if not isinstance(c, dict) or not isinstance(c.get('id'), str) or not c['id'] or c['id'] in mapping:
@@ -475,9 +509,102 @@ def create_app(settings: Settings | None = None):
                     raise HTTPException(422, 'Некорректное название или Markdown заметки.') from None
                 if not data.courseId:
                     raise HTTPException(422, 'У заметки отсутствует курс.')
-                db.execute('INSERT INTO notes VALUES (?,?,?,?,?,?,?,?,?,?)', (uid(), data.courseId, data.title, data.markdown, 'generated', 1, now(), now(), None, 1))
+                check_note_quota(db, data.courseId, data.markdown)
+                db.execute('INSERT INTO notes VALUES (?,?,?,?,?,?,?,?,?,?)', (uid(), data.courseId, data.title, data.markdown, 'manual', 1, now(), now(), None, 0))
             db.execute('INSERT INTO imports VALUES (?,?)', (user_id, digest))
         return {'imported': len(notes), 'courses': len(courses)}
+
+    def cleanup(paths, job_ids):
+        import shutil
+        for raw in paths:
+            path = Path(raw)
+            if path.resolve().is_relative_to(settings.data.resolve()) or path.resolve().is_relative_to(settings.jobs.resolve()):
+                path.unlink(missing_ok=True)
+        for job_id in job_ids:
+            if re.fullmatch(r'[a-f0-9-]{36}', job_id):
+                path = settings.jobs / job_id
+                if path.is_symlink():
+                    path.unlink()
+                elif path.exists():
+                    shutil.rmtree(path)
+
+    def delete_course_rows(db, course_id):
+        active = db.execute("SELECT 1 FROM jobs WHERE course_id=? AND status IN ('acquiring','transcribing','preparing','generating')", (course_id,)).fetchone()
+        if active:
+            raise HTTPException(409, 'Дождитесь завершения активного задания перед удалением.')
+        paths = [row['path'] for row in db.execute('SELECT path FROM assets WHERE course_id=?', (course_id,))]
+        job_ids = [row['id'] for row in db.execute('SELECT id FROM jobs WHERE course_id=?', (course_id,))]
+        for table in ['notes', 'assets', 'jobs', 'members']:
+            db.execute(f'DELETE FROM {table} WHERE course_id=?', (course_id,))
+        db.execute('DELETE FROM courses WHERE id=?', (course_id,))
+        return paths, job_ids
+
+    @app.delete('/api/courses/{course_id}')
+    def delete_course(course_id: str, user_id=Depends(user)):
+        with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
+            access(db, course_id, user_id, owner=True)
+            paths, job_ids = delete_course_rows(db, course_id)
+        cleanup(paths, job_ids)
+        return {'ok': True}
+
+    @app.delete('/api/notes/{note_id}')
+    def delete_note(note_id: str, user_id=Depends(user)):
+        paths = []
+        with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
+            entity(db, 'notes', note_id, user_id, write=True)
+            for asset in db.execute('SELECT * FROM assets WHERE note_id=?', (note_id,)).fetchall():
+                referenced = db.execute('SELECT 1 FROM notes WHERE id!=? AND course_id=? AND instr(markdown,?)>0', (note_id, asset['course_id'], '/api/assets/' + asset['id'])).fetchone()
+                if referenced:
+                    db.execute('UPDATE assets SET note_id=NULL WHERE id=?', (asset['id'],))
+                else:
+                    paths.append(asset['path']); db.execute('DELETE FROM assets WHERE id=?', (asset['id'],))
+            db.execute('DELETE FROM notes WHERE id=?', (note_id,))
+            db.execute('UPDATE jobs SET note_id=NULL WHERE note_id=?', (note_id,))
+        cleanup(paths, [])
+        return {'ok': True}
+
+    @app.delete('/api/account')
+    @account_action
+    def delete_account(body: PasswordInput, response: Response, user_id=Depends(user)):
+        from .worker import JobError, rpc
+        throttle(settings, 'delete-account:' + user_id, 5, 3600)
+        with connect(settings) as db:
+            account = db.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+        if not account or account['disabled']:
+            raise HTTPException(409, 'Выполняется удаление аккаунта.')
+        if not password_matches(account['password_hash'], body.password):
+            raise HTTPException(401, 'Неверный пароль.')
+        with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute("SELECT 1 FROM jobs WHERE (created_by=? OR course_id IN (SELECT id FROM courses WHERE owner_id=?)) AND status IN ('acquiring','transcribing','preparing','generating')", (user_id, user_id)).fetchone():
+                raise HTTPException(409, 'Дождитесь завершения активных заданий перед удалением аккаунта.')
+            result = db.execute('UPDATE users SET disabled=2 WHERE id=? AND password_hash=?', (user_id, account['password_hash']))
+            if result.rowcount != 1:
+                raise HTTPException(409, 'Аккаунт изменён. Повторите вход.')
+            db.execute("UPDATE jobs SET status='cancelled',completed_at=? WHERE status='queued' AND (created_by=? OR course_id IN (SELECT id FROM courses WHERE owner_id=?))", (now(), user_id, user_id))
+            has_profile = bool(db.execute('SELECT 1 FROM provider_links WHERE user_id=?', (user_id,)).fetchone())
+        if has_profile:
+            try:
+                rpc(settings, settings.providers_url, '/profiles/purge', {'userId': user_id}, timeout=40)
+            except JobError:
+                with connect(settings) as db:
+                    db.execute('UPDATE users SET disabled=0 WHERE id=?', (user_id,))
+                raise HTTPException(503, 'Не удалось удалить подключение провайдера. Аккаунт сохранён; повторите попытку позже.') from None
+        paths, jobs = [], []
+        with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
+            for course in db.execute('SELECT id FROM courses WHERE owner_id=?', (user_id,)).fetchall():
+                file_paths, job_ids = delete_course_rows(db, course['id'])
+                paths.extend(file_paths); jobs.extend(job_ids)
+            for table in ['members', 'sessions', 'auth_tokens', 'imports', 'provider_links']:
+                db.execute(f'DELETE FROM {table} WHERE user_id=?', (user_id,))
+            db.execute('DELETE FROM mail_outbox WHERE recipient=?', (account['email'],))
+            db.execute('DELETE FROM users WHERE id=?', (user_id,))
+        cleanup(paths, jobs)
+        response.delete_cookie(settings.cookie_name, path='/', secure=settings.production, httponly=True, samesite='strict')
+        return {'ok': True}
 
     return app
 

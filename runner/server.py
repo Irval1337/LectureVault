@@ -3,17 +3,44 @@ import json
 import os
 import re
 from pathlib import Path
+from contextlib import asynccontextmanager
 from functools import wraps
 import threading
+import tempfile
+import sys
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from .common import auth, fail, run
+from .common import auth, fail, run as run_process
 
 KIND = os.environ.get('RUNNER_KIND', 'media')
 JOBS = Path('/jobs')
-app = FastAPI(docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(_app):
+    from .sandbox import abi
+    if os.geteuid() == 0 or abi() < 3:
+        raise RuntimeError('Non-root Linux Landlock ABI 3 is required')
+    if KIND == 'providers':
+        from .provider import PROFILES, secret_cipher
+        from .sandbox import abi
+        if os.geteuid() == 0 or abi() < 3:
+            raise RuntimeError('Non-root Linux Landlock ABI 3 is required for provider isolation')
+        PROFILES.mkdir(parents=True, exist_ok=True, mode=0o700)
+        secret_cipher()
+    yield
+
+app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
 media_lock = threading.Lock()
+
+def run(argv, *, cwd, timeout):
+    # Media parsers see one job only, not the other users' uploaded files.
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        home, temporary = root / 'home', root / 'tmp'
+        home.mkdir(); temporary.mkdir()
+        command = [sys.executable, '-m', 'runner.sandbox', str(home), str(cwd), str(temporary), *argv]
+        environment = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': str(home), 'TMPDIR': str(temporary), 'PYTHONPATH': '/app', 'LANG': 'C.UTF-8', 'OMP_NUM_THREADS': '4'}
+        return run_process(command, cwd=cwd, timeout=timeout, env=environment)
 
 def serialized_media(function):
     @wraps(function)
@@ -60,7 +87,11 @@ def transcribe(body: MediaInput):
         language = body.language if body.language in ['ru', 'en', 'auto'] else 'ru'
         result = directory / 'transcript'
         run(['/opt/whisper/bin/whisper-cli', '-m', os.environ.get('WHISPER_MODEL', '/opt/models/ggml-tiny.bin'), '-f', str(audio), '-l', language, '-t', '4', '-ng', '-otxt', '-of', str(result)], cwd=directory, timeout=3600)
-        text = result.with_suffix('.txt').read_text(encoding='utf-8')
+        output = result.with_suffix('.txt')
+        if output.is_symlink() or not output.resolve().is_relative_to(directory.resolve()):
+            fail('UNSAFE_OUTPUT', 'Обработчик создал недопустимый выходной файл.')
+        with output.open(encoding='utf-8') as transcript:
+            text = transcript.read(140001)
     finally:
         audio.unlink(missing_ok=True)
     if len(text) > 140000:

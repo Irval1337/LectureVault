@@ -24,3 +24,11 @@ storage/
 test-results/
 playwright-report/
 *.tsbuildinfo
+backups/
+*.tar.gz
+*.tgz
+*.zip
+*.pem
+*.key
+auth.json
+credentials.json

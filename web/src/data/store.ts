@@ -2,18 +2,21 @@ import { useSyncExternalStore } from 'react'
 import { initialState, STORAGE_KEY, type AppState, type JobInput, type Note } from './model'
 import { api, ApiError } from './api'
 
-export type User = { id: string; name: string }
-type Session = { loading: boolean; user: User | null; users: User[]; error: string }
-let session: Session = { loading: true, user: null, users: [], error: '' }
+export type User = { id: string; name: string; email: string; verified: boolean }
+type Session = { loading: boolean; user: User | null; emailVerification: boolean; supportEmail?: string; error: string }
+let session: Session = { loading: true, user: null, emailVerification: true, error: '' }
 let state = initialState()
 let storageError = ''
 let initialized = false
 let refreshing: Promise<void> | undefined
 let lastPayload = ''
+const noteCache = new Map<string, Note>()
+const noteRequests = new Map<string, Promise<void>>()
 const listeners = new Set<() => void>()
 const emit = () => listeners.forEach(fn => fn())
 const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } }
-const preferenceKey = () => `lecturevault.ui.${session.user?.id ?? 'demo'}`
+const notifyAuth = () => { try { localStorage.setItem('lecturevault.auth-event', crypto.randomUUID()) } catch { /* cookie session remains valid */ } }
+const preferenceKey = () => `lecturevault.ui.${session.user?.id ?? 'anonymous'}`
 
 function preferences() {
   try { return JSON.parse(localStorage.getItem(preferenceKey()) || '{}') as Pick<AppState, 'expandedCourses' | 'readerTheme'> }
@@ -34,7 +37,17 @@ async function refresh(force = false) {
       const payload = await api<Pick<AppState, 'version' | 'courses' | 'notes' | 'jobs'>>('/state')
       if (session.user?.id !== requestingUser) return
       const serialized = JSON.stringify(payload)
-      if (serialized !== lastPayload) { lastPayload = serialized; state = { ...state, ...payload }; emit() }
+      if (serialized !== lastPayload) {
+        lastPayload = serialized
+        const notes = payload.notes.map(note => {
+          const cached = noteCache.get(note.id)
+          const editing = window.location.pathname === `/notes/${note.id}/edit`
+          if (cached && cached.revision !== note.revision && !editing) noteCache.delete(note.id)
+          return cached && (cached.revision === note.revision || editing) ? cached : note
+        })
+        for (const id of noteCache.keys()) if (!notes.some(note => note.id === id)) noteCache.delete(id)
+        state = { ...state, ...payload, notes }; emit()
+      }
       if (storageError) { storageError = ''; emit() }
     } catch (error) {
       if (session.user?.id !== requestingUser) return
@@ -55,25 +68,28 @@ export const auth = {
     initialized = true
     session = { ...session, loading: true, error: '' }; emit()
     try {
-      const result = await api<{ user: User | null; users: User[] }>('/auth')
+      const result = await api<{ user: User | null; emailVerification: boolean; supportEmail?: string }>('/auth')
       session = { ...result, loading: false, error: '' }
-      if (session.user) { state = { ...initialState(), ...preferences() }; lastPayload = ''; await refresh(true) }
+      if (session.user) { noteCache.clear(); state = { ...initialState(), ...preferences() }; lastPayload = ''; await refresh(true) }
     } catch (error) { session = { ...session, loading: false, error: (error as Error).message } }
     emit()
   },
-  async login(userId: string) {
-    session = { ...session, loading: true, error: '' }; emit()
-    try {
-      const result = await api<{ user: User }>('/auth/login', { method: 'POST', body: JSON.stringify({ userId }) })
-      session = { ...session, user: result.user }
-      state = { ...initialState(), ...preferences() }; lastPayload = ''; await refresh(true)
-      session = { ...session, loading: false }
-    } catch (error) { session = { ...session, loading: false, user: null, error: (error as Error).message } }
-    emit()
+  async login(email: string, password: string) {
+    const result = await api<{ user: User }>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
+    await auth.acceptUser(result.user)
   },
+  async acceptUser(user: User) {
+    session = { ...session, user, loading: false, error: '' }
+    noteCache.clear(); state = { ...initialState(), ...preferences() }; lastPayload = ''; await refresh(true); emit(); notifyAuth()
+  },
+  eraseLocalUserData(userId: string) {
+    for (const key of Object.keys(localStorage)) if (key === `lecturevault.ui.${userId}` || key === `lecturevault.space.${userId}` || key === `lecturevault.generation-draft.${userId}` || key.startsWith(`lecturevault.note-draft.${userId}.`)) localStorage.removeItem(key)
+  },
+  updateUser(user: User) { session = { ...session, user }; emit() },
+  clear() { session = { ...session, user: null }; noteCache.clear(); state = initialState(); lastPayload = ''; emit(); notifyAuth() },
   async logout() {
     await api('/auth/logout', { method: 'POST' })
-    session = { ...session, user: null }; state = initialState(); lastPayload = ''; emit()
+    session = { ...session, user: null }; noteCache.clear(); state = initialState(); lastPayload = ''; emit(); notifyAuth()
   },
 }
 
@@ -82,6 +98,24 @@ export const library = {
   getSnapshot: () => state,
   getError: () => storageError,
   reportError(error: unknown) { storageError = error instanceof Error ? error.message : 'Не удалось выполнить действие.'; emit() },
+  async loadNote(id: string, force = false) {
+    const owner = session.user?.id
+    if (!owner) return
+    const key = `${owner}:${id}`
+    if (noteRequests.has(key)) return noteRequests.get(key)
+    if (!force && noteCache.has(id)) return
+    const request = api<Note>(`/notes/${id}`).then(result => {
+      if (session.user?.id !== owner) return
+      const note = { ...result, contentLoaded: true }
+      noteCache.delete(id); noteCache.set(id, note)
+      const evicted = new Set<string>()
+      while (noteCache.size > 20) { const oldId = noteCache.keys().next().value!; noteCache.delete(oldId); evicted.add(oldId) }
+      state = { ...state, notes: state.notes.map(existing => existing.id === id ? note : evicted.has(existing.id) ? { ...existing, markdown: '', contentLoaded: false } : existing) }; emit()
+    }).catch(error => library.reportError(error)).finally(() => { noteRequests.delete(key) })
+    noteRequests.set(key, request); return request
+  },
+  async deleteNote(id: string) { await api(`/notes/${id}`, { method: 'DELETE' }); noteCache.delete(id); await refresh(true) },
+  async deleteCourse(id: string) { await api(`/courses/${id}`, { method: 'DELETE' }); await refresh(true) },
   async createCourse(title: string, workspace: 'personal' | 'shared') {
     const result = await api<{ id: string }>('/courses', { method: 'POST', body: JSON.stringify({ title: title.trim(), workspace }) })
     await refresh(true)
@@ -90,13 +124,14 @@ export const library = {
   },
   async createNote(courseId: string) {
     const note = await api<Note>('/notes', { method: 'POST', body: JSON.stringify({ courseId }) })
+    noteCache.set(note.id, { ...note, contentLoaded: true })
     await refresh(true)
     if (!state.expandedCourses.includes(courseId)) library.toggleCourse(courseId)
     return note
   },
   async saveNote(id: string, title: string, markdown: string, revision: number) {
     const note = await api<Note>(`/notes/${id}`, { method: 'PATCH', body: JSON.stringify({ title, markdown, revision }) })
-    await refresh(true)
+    noteCache.set(note.id, { ...note, contentLoaded: true }); await refresh(true)
     return note
   },
   async createJob(input: JobInput, video?: File, pdf?: File) {
@@ -127,3 +162,6 @@ export const library = {
 
 export function useLibrary() { return useSyncExternalStore(subscribe, library.getSnapshot) }
 export function useSession() { return useSyncExternalStore(subscribe, auth.getSnapshot) }
+
+window.addEventListener('storage', event => { if (event.key === 'lecturevault.auth-event') void auth.initialize(true) })
+window.addEventListener('pageshow', event => { if (event.persisted) void auth.initialize(true) })

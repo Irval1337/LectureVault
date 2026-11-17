@@ -18,10 +18,10 @@ def fail(code, message):
     raise HTTPException(422, {'code': code, 'message': message})
 
 
-def run(argv, *, cwd, timeout, text_input=None, allow_failure=False):
+def run(argv, *, cwd, timeout, text_input=None, allow_failure=False, env=None):
     # Static executable/options, bounded input. A process group is killed on timeout.
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE if text_input is not None else subprocess.DEVNULL, stdout=output, stderr=errors, start_new_session=True, env={**os.environ, 'OMP_NUM_THREADS': '4'})
+        process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE if text_input is not None else subprocess.DEVNULL, stdout=output, stderr=errors, start_new_session=True, env=env if env is not None else {**os.environ, 'OMP_NUM_THREADS': '4'})
         try:
             process.communicate(text_input.encode() if text_input is not None else None, timeout=timeout)
         except subprocess.TimeoutExpired:

@@ -2,7 +2,7 @@ FROM python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY backend/requirements.lock /tmp/requirements.lock
-RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock && groupadd -g 10001 lecturevault && useradd -u 10001 -g 10001 -m lecturevault && mkdir -p /data /jobs /secrets/media /secrets/alice /secrets/bob && chown -R 10001:10001 /data /jobs /secrets
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock && groupadd -g 10001 lecturevault && useradd -u 10001 -g 10001 -m lecturevault && mkdir -p /data /jobs /backups /secrets/media /secrets/providers /secrets/auth && chown -R 10001:10001 /data /jobs /backups /secrets
 FROM runtime AS api
 COPY backend/ /app/backend/
 COPY fixtures/demo-note.md /app/fixtures/demo-note.md

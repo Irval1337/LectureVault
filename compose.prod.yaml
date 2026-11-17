@@ -1,0 +1,49 @@
+# Use together with compose.yaml and a private .env.production. No demo/dev inbox.
+x-production: &production
+  LV_ENV: production
+  LV_PUBLIC_URL: https://${LV_DOMAIN:?Set LV_DOMAIN}
+  LV_VERIFY_EMAIL: "1"
+  LV_SUPPORT_EMAIL: ${LV_SUPPORT_EMAIL:?Set support contact email}
+  LV_SMTP_HOST: ${LV_SMTP_HOST:?Set SMTP host}
+  LV_SMTP_PORT: ${LV_SMTP_PORT:-587}
+  LV_SMTP_TLS: ${LV_SMTP_TLS:-starttls}
+  LV_SMTP_USER: ${LV_SMTP_USER:?Set SMTP username}
+  LV_SMTP_PASSWORD_FILE: /secrets/auth/smtp-password
+  LV_MAIL_FROM: ${LV_MAIL_FROM:?Set verified sender address}
+
+services:
+  web:
+    ports: !reset []
+  api:
+    environment: *production
+  worker:
+    environment: *production
+  mailer:
+    environment: *production
+  mailpit:
+    profiles: [development]
+    ports: !reset []
+  edge:
+    build: {context: ., dockerfile: deploy/Dockerfile.edge}
+    user: "10001:10001"
+    environment:
+      LV_DOMAIN: ${LV_DOMAIN:?Set LV_DOMAIN}
+      LV_ACME_EMAIL: ${LV_ACME_EMAIL:?Set certificate contact email}
+    ports: ["80:8080", "443:8443"]
+    volumes: ["tls-data:/data", "tls-config:/config"]
+    networks: [private, ingress]
+    depends_on: {web: {condition: service_healthy}}
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: "5m", max-file: "2"}}
+
+volumes:
+  tls-data:
+  tls-config:
+networks:
+  ingress:

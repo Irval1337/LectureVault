@@ -32,7 +32,7 @@ def connect(settings: Settings):
 def initialize(settings: Settings):
     for directory in [settings.data, settings.data / 'assets', settings.jobs, settings.secrets]:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for scope in ['media', 'alice', 'bob']:
+    for scope in ['media', 'providers', 'auth']:
         directory = settings.secrets / scope
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
@@ -41,9 +41,29 @@ def initialize(settings: Settings):
             (directory / 'runner-key').chmod(0o600)
         except FileExistsError:
             pass
+    from cryptography.fernet import Fernet
+    try:
+        with (settings.secrets / 'auth' / 'encryption-key').open('xb') as key:
+            key.write(Fernet.generate_key())
+        (settings.secrets / 'auth' / 'encryption-key').chmod(0o600)
+    except FileExistsError:
+        pass
     with connect(settings) as db:
         db.execute('PRAGMA journal_mode=WAL')
         db.executescript('''
+        CREATE TABLE IF NOT EXISTS users (
+          id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE COLLATE NOCASE, name TEXT NOT NULL,
+          password_hash TEXT NOT NULL, verified INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL, disabled INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS auth_tokens (
+          digest TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id) NOT NULL,
+          purpose TEXT NOT NULL, expires INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS rate_limits (
+          key TEXT PRIMARY KEY, window INTEGER NOT NULL, count INTEGER NOT NULL, expires INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS mail_outbox (
+          id TEXT PRIMARY KEY, recipient TEXT NOT NULL, payload TEXT NOT NULL,
+          created_at INTEGER NOT NULL, sent_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
+          next_attempt INTEGER NOT NULL DEFAULT 0, claimed_at INTEGER);
         CREATE TABLE IF NOT EXISTS courses (
           id TEXT PRIMARY KEY, title TEXT NOT NULL, workspace TEXT NOT NULL,
           owner_id TEXT NOT NULL, created_at INTEGER NOT NULL);
@@ -67,14 +87,19 @@ def initialize(settings: Settings):
           path TEXT NOT NULL, size INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS sessions (
           digest TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS provider_links (user_id TEXT PRIMARY KEY REFERENCES users(id));
         CREATE TABLE IF NOT EXISTS imports (
           user_id TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(user_id,digest));
         CREATE INDEX IF NOT EXISTS note_course ON notes(course_id);
         CREATE INDEX IF NOT EXISTS job_course ON jobs(course_id);
         ''')
-        if not db.execute("SELECT 1 FROM courses WHERE id='shared-course'").fetchone():
-            db.execute('INSERT INTO courses VALUES (?,?,?,?,?)', ('shared-course', 'Общий курс', 'shared', 'alice', now()))
-            db.execute('INSERT INTO members VALUES (?,?,?)', ('shared-course', 'bob', 'editor'))
+        columns = {row['name'] for row in db.execute('PRAGMA table_info(sessions)')}
+        for name in ['created_at', 'last_seen']:
+            if name not in columns:
+                db.execute(f'ALTER TABLE sessions ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
+        db.execute('CREATE INDEX IF NOT EXISTS session_user ON sessions(user_id)')
+        db.execute('CREATE INDEX IF NOT EXISTS mail_pending ON mail_outbox(sent_at,next_attempt)')
+
 
 
 def course_json(row, role):
