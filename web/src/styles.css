@@ -455,3 +455,59 @@ svg { flex-shrink: 0; }
 .quartz-reader article pre > code { min-width: 0; max-width: 100%; scrollbar-width: thin; overscroll-behavior-x: contain; }
 
 .desktop-sidebar > * { min-width: 0; }
+
+/* Server-backed workspace and the ready-made Milkdown editor share Studio tokens. */
+.session-page { min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: var(--surface-page); }
+.session-panel { width: min(100%, 360px); display: flex; flex-direction: column; align-items: stretch; gap: 20px; }
+.session-panel h1 { font-size: 24px; margin: 12px 0 0; }
+.session-panel > p, .session-panel small { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+.session-panel > a { color: var(--accent); font-size: 13px; }
+.session-users { display: flex; gap: 12px; }
+.session-users > button { flex: 1; min-height: 44px; }
+.new-menu { display: flex; flex-direction: column; gap: 12px; margin-top: 20px; }
+.new-menu > button { justify-content: flex-start; min-height: 44px; gap: 10px; }
+.page-actions { display: flex; align-items: center; gap: 10px; }
+.member-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--border-default); font-size: 13px; }
+.member-row select { width: 150px; }
+.generation-mode { margin-bottom: 26px; max-width: 420px; }
+.provider-options { margin-bottom: 24px; }
+.provider-options > select { width: 100%; }
+.provider-model-effort { display: grid; grid-template-columns: minmax(0, 1fr) minmax(110px, .6fr); gap: 12px; margin-top: 14px; }
+.provider-model-effort select { width: 100%; }
+.provider-row { padding: 18px 0; border-bottom: 1px solid var(--border-default); }
+.provider-heading { display: flex; align-items: center; justify-content: space-between; font-size: 14px; }
+.provider-login { display: grid; gap: 10px; margin-top: 16px; font-size: 13px; line-height: 1.6; }
+.provider-login a { color: var(--accent); text-decoration: underline; }
+.provider-login p { margin: 0; }
+.provider-connections > .field-hint { margin-top: 16px; }
+.note-editor { min-width: 0; }
+.editor-controls { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+.editor-controls > span { color: var(--text-muted); font-size: 12px; margin-left: auto; }
+.editor-back { display: flex; gap: 6px; align-items: center; color: var(--text-muted); font-size: 13px; }
+.editor-title { width: 100%; font: 28px/1.4 var(--font-reader); color: var(--text-primary); margin-bottom: 24px; }
+.editor-error { padding: 12px 0; color: var(--danger); display: flex; gap: 12px; flex-wrap: wrap; align-items: center; font-size: 13px; }
+.editor-error > p { flex-basis: 100%; }
+.crepe-host { min-height: 400px; min-width: 0; border-top: 1px solid var(--border-default); }
+.crepe-host .milkdown { --crepe-color-background: var(--surface-page); --crepe-color-on-background: var(--text-body); --crepe-color-surface: var(--surface-navigation); --crepe-color-surface-low: var(--surface-raised); --crepe-color-on-surface: var(--text-primary); --crepe-color-on-surface-variant: var(--text-muted); --crepe-color-outline: var(--text-muted); --crepe-color-primary: var(--accent); --crepe-color-secondary: var(--surface-selected); --crepe-color-on-secondary: var(--text-primary); --crepe-font-default: var(--font-reader); --crepe-font-title: var(--font-ui); --crepe-font-code: var(--font-code); background: var(--surface-page); }
+.crepe-host .milkdown .ProseMirror { padding: 24px 32px 100px; min-height: 360px; font-family: var(--font-reader); font-size: 17px; line-height: 1.7; }
+.crepe-host .milkdown .ProseMirror:focus-visible { outline: 1px solid var(--focus-ring); outline-offset: 3px; }
+.crepe-host .milkdown .ProseMirror h1, .crepe-host .milkdown .ProseMirror h2, .crepe-host .milkdown .ProseMirror h3 { font-family: var(--font-ui); }
+.crepe-host .milkdown .ProseMirror h1 { font-size: 28px; line-height: 1.35; }
+.crepe-host .milkdown .ProseMirror h2 { font-size: 21px; line-height: 1.4; }
+.crepe-host .milkdown .ProseMirror h3 { font-size: 17px; line-height: 1.4; }
+.crepe-host .milkdown button, .crepe-host .milkdown input { font-family: var(--font-ui); }
+.crepe-host .milkdown .ProseMirror img { max-width: 100%; }
+.crepe-host .milkdown .ProseMirror pre, .crepe-host .milkdown .ProseMirror .katex-display { overflow-x: auto; max-width: 100%; }
+@media (max-width: 767px) {
+  .page-actions { gap: 6px; }
+  .editor-controls { gap: 8px; flex-wrap: wrap; }
+  .editor-controls > span { font-size: 12px; }
+  .editor-title { font-size: 24px; }
+  .crepe-host .milkdown .ProseMirror { padding: 20px 6px 80px; font-size: 16px; }
+  .reader-toolbar .button { font-size: 12px; padding-left: 7px; padding-right: 7px; }
+}
+.account-trigger { display: flex; justify-content: space-between; width: 100%; font-weight: 500; }
+.account-trigger > span { color: var(--text-muted); font-weight: 400; }
+.provider-heading > div { display: grid; gap: 4px; }
+.provider-heading > div > span { color: var(--text-muted); font-size: 13px; }
+.account-signout { border-top: 1px solid var(--border); padding-top: 16px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; font-size: 13px; color: var(--text-muted); }

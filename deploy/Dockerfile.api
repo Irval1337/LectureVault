@@ -1,0 +1,26 @@
+FROM python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254 AS runtime
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+COPY backend/requirements.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock && groupadd -g 10001 lecturevault && useradd -u 10001 -g 10001 -m lecturevault && mkdir -p /data /jobs /secrets/media /secrets/alice /secrets/bob && chown -R 10001:10001 /data /jobs /secrets
+FROM runtime AS api
+COPY backend/ /app/backend/
+COPY fixtures/demo-note.md /app/fixtures/demo-note.md
+USER 10001:10001
+CMD ["python", "-m", "uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8090", "--no-access-log"]
+
+FROM python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254 AS whisper-build
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake curl ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN curl -fsSL --retry 3 https://github.com/ggml-org/whisper.cpp/archive/d1be6fde11ac6e0407606b4e42fe72d34add8037.tar.gz | tar xz --strip-components=1 && cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DBUILD_SHARED_LIBS=OFF && cmake --build build --target whisper-cli -j 4
+RUN mkdir /models && curl -fL --retry 4 https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin -o /models/ggml-tiny.bin && echo 'be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21  /models/ggml-tiny.bin' | sha256sum -c -
+
+FROM runtime AS media
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg poppler-utils libgomp1 && rm -rf /var/lib/apt/lists/*
+COPY --from=whisper-build /src/build/bin/whisper-cli /opt/whisper/bin/whisper-cli
+COPY --from=whisper-build /models/ /opt/models/
+COPY runner/ /app/runner/
+ENV RUNNER_KIND=media
+USER 10001:10001
+CMD ["python", "-m", "uvicorn", "runner.server:app", "--host", "0.0.0.0", "--port", "8090", "--no-access-log"]

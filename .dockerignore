@@ -11,7 +11,14 @@ web/dist/
 !fixtures/**
 !deploy/
 !deploy/**
+!backend/
+!backend/**
+!runner/
+!runner/**
 **/.env
 **/.env.*
 **/*.log
 **/node_modules/
+
+**/__pycache__/
+**/*.pyc

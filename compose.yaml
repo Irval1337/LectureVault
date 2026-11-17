@@ -1,3 +1,20 @@
+x-app: &app
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile.api
+    target: api
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  pids_limit: 128
+  mem_limit: 1g
+  cpus: 2
+  logging:
+    driver: json-file
+    options: {max-size: "5m", max-file: "2"}
+
 services:
   web:
     build:
@@ -5,6 +22,10 @@ services:
       dockerfile: deploy/Dockerfile.web
     ports:
       - "127.0.0.1:${LECTUREVAULT_PORT:-5180}:8080"
+      - "127.0.0.1:${LECTUREVAULT_AUTH_PORT:-1455}:1455"
+    networks: [private, frontend]
+    depends_on:
+      api: {condition: service_healthy}
     user: "101:101"
     read_only: true
     tmpfs:
@@ -28,3 +49,74 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
+  api:
+    <<: *app
+    volumes: ["data:/data", "jobs:/jobs", "secret-media:/secrets/media", "secret-alice:/secrets/alice", "secret-bob:/secrets/bob"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=650m"]
+    networks: [private, accounts]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+  worker:
+    <<: *app
+    environment: {LV_MOCK_SECONDS: "${LV_MOCK_SECONDS:-6}"}
+    command: ["python", "-m", "backend.worker"]
+    volumes: ["data:/data", "jobs:/jobs", "secret-media:/secrets/media:ro", "secret-alice:/secrets/alice:ro", "secret-bob:/secrets/bob:ro"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    networks: [processing, accounts]
+    depends_on:
+      api: {condition: service_healthy}
+  media:
+    <<: *app
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.api
+      target: media
+    volumes: ["jobs:/jobs", "secret-media:/secrets:ro"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m"]
+    networks: [processing]
+    mem_limit: 3g
+    cpus: 4
+    pids_limit: 128
+  provider-alice:
+    <<: *app
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.providers
+    environment: {PROFILE_USER: alice}
+    volumes: ["profile-alice:/home/lecturevault", "secret-alice:/secrets:ro"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m", "/work:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"]
+    networks: [accounts, provider]
+    mem_limit: 1g
+  provider-bob:
+    <<: *app
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.providers
+    environment: {PROFILE_USER: bob}
+    volumes: ["profile-bob:/home/lecturevault", "secret-bob:/secrets:ro"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=128m", "/work:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"]
+    networks: [accounts, provider]
+    mem_limit: 1g
+
+volumes:
+  data:
+  jobs:
+  secret-media:
+  secret-alice:
+  secret-bob:
+  profile-alice:
+  profile-bob:
+
+networks:
+  private:
+    internal: true
+  provider:
+  frontend:
+  processing:
+    internal: true
+  accounts:
+    internal: true

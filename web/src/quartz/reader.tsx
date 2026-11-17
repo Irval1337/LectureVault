@@ -27,7 +27,7 @@ export function compileMarkdown(markdown: string) {
   const toc: TocEntry[] = []
   visit(tree, 'element', (node: Element) => {
     if (/^h[2-4]$/.test(node.tagName)) toc.push({ depth: Number(node.tagName[1]) - 2, slug: String(node.properties.id), text: toString(node) })
-    if (node.tagName === 'img' && node.properties.src !== '/demo-replication.svg') {
+    if (node.tagName === 'img' && node.properties.src !== '/demo-replication.svg' && !(typeof node.properties.src === 'string' && /^\/api\/assets\/[a-f0-9-]{36}$/.test(node.properties.src))) {
       node.tagName = 'span'; node.children = [{ type: 'text', value: String(node.properties.alt || 'Внешнее изображение отключено') }]; node.properties = {}
     }
     if (node.tagName === 'a' && typeof node.properties.href === 'string' && /^https?:/.test(node.properties.href)) {

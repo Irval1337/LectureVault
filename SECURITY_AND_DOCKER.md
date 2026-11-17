@@ -76,3 +76,21 @@ LectureVault получает недоверенные видеоссылки, �
 **К 19 ноября:** compose для UI+API+worker, persistent volume, локальный mock login, основной сквозной сценарий, ограничение загрузок, проверка прав API, безопасный запуск реального pipeline хотя бы для файла. Контроль SSRF и настоящий публичный auth **не объявлять готовыми**, если не реализованы. Если yt-dlp безопасно ограничить не удалось — отключить загрузку по URL для недоверенных пользователей и честно отметить ограничения.
 
 Не внедрять лишние меры формально: сначала audit → threat model → plan → implementation → verification. Применять security к реальным точкам входа; не усложнять первым делом mock-прототип до невозможности завершить ИДЗ.
+
+## 9. Реализация итогового этапа, 17 ноября
+
+Текущий Compose: web (UID101), API/worker/media и provider-alice/provider-bob (UID10001), read-only rootfs, cap_drop ALL, no-new-privileges, tmpfs/ресурсные лимиты. На host опубликован только web на 127.0.0.1:5180 и OAuth callback 127.0.0.1:1455. CPU Whisper tiny зафиксирован по revision и SHA-256; CUDA не включена, NVIDIA runtime не устанавливался.
+
+Media находится в отдельной internal-сети с worker: не имеет внешней сети, CLI-секретов, данных API и home/vault. CLI-контейнеры получают только собственный профиль и отдельный RPC-секрет, без базы/медиа. Worker передаёт ограниченный транскрипт и текст PDF как недоверенные данные, не путь/команду. Инструменты Codex отключены, user config/rules/skills не загружаются; Claude запускается с пустыми tools/MCP/settings. CLI credentials сохраняются только в profile volume пользователя. Браузерная сессия и CLI OAuth — разные уровни входа.
+
+Codex native browser OAuth: официальный CLI хранит PKCE, API пересылает callback только в fixed loopback CLI-сервер после проверки state. Это не proxy произвольного URL. OAuth query не логируется web/API/runner. Для Claude официальный flow может требовать одноразовый authorization code; access/refresh tokens не передаются UI. Существующие host credentials не используются и не изменяются.
+
+Фактические лимиты: видео512МБ/2ч, PDF50МБ/100стр с текстом, PNG/JPEG/WebP10МБ, 10 активных jobs пользователя, 3ГБ assets экземпляра; серверные UUID-имена, signature/type checks, path confinement, запрет symlink, квоты проверяются повторно в транзакции после загрузки. Изображения доступны через ACL API, пользовательский SVG/unsafe HTML/внешние embeds запрещены. Real URL/yt-dlp отключены; mock URL не вызывает сеть. Парсеры и CLI ограничены по времени и ресурсам, shell=False/static argv.
+
+Серверные owner/editor/viewer действуют на Note, job, asset, экспорт и membership. Управление job — только отправителю, чтобы другой участник не расходовал его CLI-профиль повтором. Revision409 не перезаписывает документ; browser draft можно скачать и явно заменить актуальной версией.
+
+**Граница локального демо:** оба профиля выбираются без пароля, поэтому человек с доступом к localhost может войти в любой из них и использовать сохранённый CLI-аккаунт этого профиля. Такая сборка не изолирует людей на одной машине и не предназначена для общего публичного доступа. OAuth CLI не заменяет настоящую авторизацию приложения. Требования реального публичного auth остаются из раздела 6.
+
+Browser-приёмка создаёт новый process-specific Compose project и удаляет только его volumes/images. Рабочие volumes приложения и прежний localStorage не очищаются. Ни секреты, ни media, ни DB не включаются в Git/архив/build context. Успех автоматической mock-приёмки не является доказательством реальной Claude-генерации; проверенный настоящий путь в этом окружении — Whisper + PDF + Codex.
+
+Для Codex дополнительно применяется узкий неизменяемый `runner/codex-models.json`: у трёх разрешённых моделей отключены shell/apply_patch/search/experimental tools и code-mode. Это необходимо, потому что `shell_tool=false` само по себе не отключает apply_patch в CLI 0.169.0. Структура и параметры совместимости сверены с [официальным каталогом CLI 0.169.0](https://github.com/openai/codex/blob/rust-v0.169.0/codex-rs/models-manager/models.json); инструкции генерации заданы LectureVault. Файл не содержит аккаунтов или credentials и не строится из личного CLI cache. Чужие config/rules/skills не загружаются.
