@@ -51,6 +51,7 @@ test('explicit legacy import preserves source localStorage and exports exact Mar
   expect(await page.evaluate(() => localStorage.getItem('lecturevault.library.v1'))).toBe(JSON.stringify(seed))
   await page.getByRole('link', { name: 'К курсу', exact: true }).click()
   page.once('dialog', dialog => dialog.accept())
+  await page.getByLabel('Действия курса', { exact: true }).click()
   await page.getByRole('button', { name: 'Удалить курс', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Библиотека', exact: true })).toBeVisible()
   expect((await page.request.get(`/api/notes/${note.id}`)).status()).toBe(404)

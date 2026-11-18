@@ -1,6 +1,6 @@
 import { test as base, expect, type APIRequestContext, type Page } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, writeFile, copyFile } from 'node:fs/promises'
 
 export const headers = { 'X-LectureVault': '1' }
 export const password = 'A secure phrase for browser acceptance'
@@ -59,5 +59,8 @@ export async function capture(page: Page, name: string) {
   await page.evaluate(() => document.fonts.ready)
   await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }))
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-  await page.screenshot({ path: shots + name + '.png', animations: 'disabled' })
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)
+  const path = shots + name + '-' + stamp + '.png'
+  await page.screenshot({ path, animations: 'disabled' })
+  await copyFile(path, shots + name + '.png')
 }

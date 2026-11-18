@@ -6,7 +6,7 @@ export async function api<T = unknown>(path: string, options: RequestInit = {}):
   let response: Response
   try {
     response = await fetch(`/api${path}`, { credentials: 'same-origin', ...options, headers: { 'X-LectureVault': '1', ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...options.headers } })
-  } catch { throw new ApiError('Сервер недоступен. Проверьте локальный запуск; ваши данные не удалены.', 0) }
+  } catch { throw new ApiError('Не удалось связаться с сервером. Проверьте соединение и повторите попытку.', 0) }
   if (!response.ok) {
     const result = await response.json().catch(() => ({}))
     const detail = result.detail

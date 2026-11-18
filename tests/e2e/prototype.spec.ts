@@ -32,13 +32,20 @@ test('registration and email verification → empty account → manual Note with
   await page.getByRole('textbox', { name: 'Исходный Markdown' }).fill(original)
   await page.getByRole('tab', { name: 'Визуально', exact: true }).click()
   await expect(page.locator('.milkdown .ProseMirror table.children')).toBeVisible()
+  const formula = page.locator('.milkdown-code-block').filter({ has: page.locator('.katex') }).first()
+  await expect(formula.locator('.codemirror-host')).toBeHidden()
+  await formula.getByRole('button', { name: 'Изменить', exact: true }).click()
+  await formula.locator('.cm-content[contenteditable="true"]').fill('R + W > N, \\qquad W > \\frac{N}{2} + 0')
+  await formula.getByRole('button', { name: 'Скрыть исходник', exact: true }).click()
+  await expect(formula.locator('.codemirror-host')).toBeHidden()
+
   await page.locator('.milkdown .ProseMirror > p').last().click(); await page.keyboard.press('End')
   await page.keyboard.press('Enter'); await page.keyboard.insertText('Сохранённая ручная правка.')
   await page.getByRole('button', { name: 'Сохранить', exact: true }).click()
   await expect(page.getByRole('status').filter({ hasText: 'Сохранено на сервере' })).toBeVisible()
   const id = new URL(page.url()).pathname.split('/')[2]
   let note = await (await page.request.get(`/api/notes/${id}`)).json()
-  for (const part of ['$$', '```', '|', '/demo-replication.svg', 'Сохранённая ручная правка.']) expect(note.markdown).toContain(part)
+  for (const part of ['$$', '```', '|', '/demo-replication.svg', 'Сохранённая ручная правка.', '+ 0']) expect(note.markdown).toContain(part)
   expect(note.origin).toBe('manual'); expect(note.jobId).toBeNull()
   expect((await (await page.request.get('/api/state')).json()).jobs).toEqual([])
   await page.locator('.milkdown .ProseMirror > p').last().click(); await page.keyboard.press('End')
@@ -50,6 +57,10 @@ test('registration and email verification → empty account → manual Note with
   await expect(page.getByRole('status').filter({ hasText: 'Сохранено на сервере' })).toBeVisible()
   note = await (await page.request.get(`/api/notes/${id}`)).json()
   expect(note.markdown).toContain('Быстрый черновик перед переходом.')
+  for (const width of [1440, 768, 390]) {
+    await page.setViewportSize({ width, height: width === 1440 ? 1000 : 844 }); await capture(page, `editor-${width}`)
+  }
+
   await page.getByRole('link', { name: 'Чтение', exact: true }).click()
   await expect(page.locator('.quartz-reader table')).toBeVisible()
   await page.reload(); await expect(page.locator('.quartz-reader .katex').first()).toBeVisible()
@@ -63,16 +74,25 @@ test('registration and email verification → empty account → manual Note with
   await capture(page, 'library-1440')
   await page.locator('.desktop-sidebar .account-trigger').click()
   await expect(page.getByRole('heading', { name: 'Настройки', exact: true })).toBeVisible()
-  await expect(page.locator('.provider-row').filter({ hasText: 'Codex' })).toContainText('Не подключён')
-  for (const width of [1440, 768, 390]) {
-    await page.setViewportSize({ width, height: width === 1440 ? 1000 : 844 }); await capture(page, `settings-${width}`)
+
+  for (const tab of ['Профиль', 'Подключения', 'Безопасность']) {
+    await page.getByRole('tab', { name: tab, exact: true }).click()
+    if (tab === 'Подключения') await expect(page.locator('.provider-row').filter({ hasText: 'Codex' })).toContainText('Не подключён')
+    for (const width of [1440, 768, 390]) {
+      await page.setViewportSize({ width, height: width === 1440 ? 1000 : 844 }); await capture(page, `settings-${{ 'Профиль': 'profile', 'Подключения': 'connections', 'Безопасность': 'security' }[tab]}-${width}`)
+    }
   }
+  await page.getByRole('tab', { name: 'Профиль', exact: true }).click()
   await page.getByLabel('Имя', { exact: true }).fill('Новое имя')
   await page.getByRole('button', { name: 'Сохранить имя', exact: true }).click()
   await expect(page.getByRole('status').filter({ hasText: 'Имя сохранено' })).toBeVisible()
   await page.setViewportSize({ width: 1440, height: 1000 }); await page.goto(`/notes/${id}`)
   await expect(page.locator('.quartz-reader article')).toBeVisible()
   page.once('dialog', dialog => dialog.accept())
+  await page.getByLabel('Действия заметки', { exact: true }).click()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Удалить', exact: true })).toBeHidden()
+  await page.getByLabel('Действия заметки', { exact: true }).click()
   await page.getByRole('button', { name: 'Удалить', exact: true }).click()
   await expect(page).toHaveURL(/\/courses\//)
   expect((await page.request.get(`/api/notes/${id}`)).status()).toBe(404)
@@ -95,7 +115,7 @@ test('password recovery is delivered by SMTP and a new user can sign in and dele
   await page.getByLabel('Пароль', { exact: true }).fill(nextPassword)
   await page.getByRole('button', { name: 'Войти', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Библиотека', exact: true })).toBeVisible()
-  await page.goto('/settings')
+  await page.goto('/settings#security')
   await page.locator('.account-removal summary').click()
   await page.getByLabel('Пароль для подтверждения', { exact: true }).fill(nextPassword)
   page.once('dialog', dialog => dialog.accept())

@@ -61,13 +61,16 @@ test('video/PDF form keeps input, rejects disconnected generation before upload;
   await expect(page.locator('.selected-file')).toContainText('выберите файл повторно')
   await page.goto('/settings#connections')
   await expect(page.locator('.provider-row').filter({ hasText: 'Codex' })).toContainText('Не подключён')
+  await page.getByRole('button', { name: 'Подключить Claude', exact: true }).click()
   await page.getByLabel('Ключ Anthropic API', { exact: true }).fill('sk-ant-test-' + 'x'.repeat(40))
   await page.getByRole('button', { name: 'Сохранить ключ', exact: true }).click()
   await expect(page.locator('.provider-row').filter({ hasText: 'Claude' })).toContainText('Ключ сохранён')
   expect(await page.evaluate(() => Object.values(localStorage).some(value => value.includes('sk-ant-test-')))).toBe(false)
   page.once('dialog', dialog => dialog.accept())
   await page.locator('.provider-row').filter({ hasText: 'Claude' }).getByRole('button', { name: 'Отключить', exact: true }).click()
+  await page.getByRole('button', { name: 'Подключить Claude', exact: true }).click()
   await expect(page.getByLabel('Ключ Anthropic API', { exact: true })).toHaveValue('')
+  await page.keyboard.press('Escape')
 })
 
 test('persistent queue: several jobs, cancel, error/retry and leaving the page (isolated test adapter only)', async ({ page, accounts }) => {

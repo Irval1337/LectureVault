@@ -1,18 +1,19 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, ArrowRight, BookOpen, BookOpenText, Check, CheckCircle2, ChevronDown, ChevronRight, Circle, Clock3, FileText, Folder, FolderOpen, HelpCircle, House, Link2, ListOrdered, LoaderCircle, Paperclip, Plus, Search, Upload, Users, X, XCircle } from 'lucide-react'
+import { ArrowLeft, ArrowRight, BookOpen, BookOpenText, Check, CheckCircle2, ChevronDown, ChevronRight, Circle, Clock3, FileText, Folder, FolderOpen, HelpCircle, House, Link2, ListOrdered, LoaderCircle, Plus, Search, Upload, Users, X, XCircle } from 'lucide-react'
 import { Button } from './components/ui/button'
+import { ActionMenu } from './components/ui/action-menu'
 import { Dialog } from './components/ui/dialog'
 import { TabBar } from './components/ui/tab-bar'
 import { PageHeading } from './components/ui/page-heading'
 import { ActivityRail, WorkspaceHeader, ReaderActions, ReaderInspector } from './components/workspace'
 import { library, useLibrary, useSession } from './data/store'
-import { ApiError } from './data/api'
+import { CreateNotePage } from './components/create-note'
 import { CourseMembers } from './components/course-members'
-import { ProviderConnections, ProviderOptions, defaultGeneration, type GenerationOptions } from './components/providers'
+import { ProviderConnections } from './components/providers'
 const NoteEditor = lazy(() => import('./components/editor'))
 import { SettingsPage } from './components/settings'
-import { isActive, LENGTH_LABELS, STAGES, STATUS_LABELS, validateUrl, type AppState, type Course, type Job, type JobInput, type Note, type Workspace } from './data/model'
+import { isActive, LENGTH_LABELS, STAGES, STATUS_LABELS, type AppState, type Course, type Job, type Note, type Workspace } from './data/model'
 import { formatDate, plural } from './lib/utils'
 import { QuartzArticle, QuartzToc } from './components/reader'
 
@@ -40,7 +41,6 @@ export default function App() {
   const [navCollapsed, setNavCollapsed] = useState(false)
   const [contextOpen, setContextOpen] = useState(true)
   const searchTimer = useRef<number | undefined>(undefined)
-  const keepNavigationForSearch = useRef(false)
   const [courseTitle, setCourseTitle] = useState('')
   const [courseError, setCourseError] = useState('')
   const activeNote = state.notes.find(n => location.pathname === `${basePath}/notes/${n.id}` || location.pathname === `${basePath}/notes/${n.id}/edit`)
@@ -65,10 +65,13 @@ export default function App() {
     if (activeNote && (!activeNote.contentLoaded || !isEditing)) void library.loadNote(activeNote.id, !isEditing)
   }, [activeNote?.id, activeNote?.revision, isEditing])
   useLayoutEffect(() => {
-    if (keepNavigationForSearch.current) keepNavigationForSearch.current = false
-    else setMobileNav(false)
     window.scrollTo(0, 0)
   }, [location.pathname])
+  useEffect(() => {
+    const closeNavigation = () => setMobileNav(false)
+    window.addEventListener('popstate', closeNavigation)
+    return () => window.removeEventListener('popstate', closeNavigation)
+  }, [])
   useEffect(() => {
     if (activeCourse) { setSpace(activeCourse.workspace); localStorage.setItem(`lecturevault.space.${session.user?.id}`, activeCourse.workspace) }
   }, [activeCourse])
@@ -103,7 +106,7 @@ export default function App() {
     return () => { window.removeEventListener('keydown', key); window.clearTimeout(searchTimer.current) }
   }, [])
 
-  function openCourseDialog(start = false) { setCourseTitle(''); setCourseError(''); setCreateAndStart(start); setCourseDialog(true) }
+  function openCourseDialog(start = false) { setMobileNav(false); setCourseTitle(''); setCourseError(''); setCreateAndStart(start); setCourseDialog(true) }
   function startNew(courseId?: string) {
     setMobileNav(false); setNewError('')
     setNewCourseId(courseId ?? (activeCourse?.role !== 'viewer' ? activeCourse?.id : undefined) ?? courses.find(c => c.role !== 'viewer')?.id ?? '')
@@ -139,7 +142,7 @@ export default function App() {
   const sidebar = <>
     <Link className="brand" to={basePath || '/'} aria-label="LectureVault — главная" onClick={() => setSearch('')}><BookOpenText size={20} strokeWidth={1.6} /><span>LectureVault</span></Link>
     <div className="space-picker"><span aria-hidden="true">{space === 'personal' ? <House size={15} /> : <Users size={15} />}</span><select aria-label="Пространство" value={space} onChange={e => switchSpace(e.target.value as Workspace)}><option value="personal">Личное пространство</option><option value="shared">Общее пространство</option></select><ChevronDown size={13} className="select-chevron" /></div>
-    <label className="search-box"><Search size={15} /><input aria-label="Поиск по библиотеке" placeholder="Поиск" value={search} onChange={e => { setSearch(e.target.value); if (location.pathname !== (basePath || '/')) { keepNavigationForSearch.current = mobileNav; navigate(basePath || '/') } }} />{search && <button className="clear-search" aria-label="Очистить поиск" onClick={() => setSearch('')}><X size={14} /></button>}</label>
+    <label className="search-box"><Search size={15} /><input aria-label="Поиск по библиотеке" placeholder="Поиск" value={search} onChange={e => { setSearch(e.target.value); if (location.pathname !== (basePath || '/')) { navigate(basePath || '/') } }} />{search && <button className="clear-search" aria-label="Очистить поиск" onClick={() => setSearch('')}><X size={14} /></button>}</label>
     <nav className="main-nav mobile-primary-nav" aria-label="Мобильная навигация"><NavLink to={basePath || '/'} end><BookOpen size={16} />Библиотека</NavLink>{<button className="mobile-new" onClick={() => startNew()}><Plus size={16} />Новый</button>}{<NavLink to="/queue"><ListOrdered size={16} />Очередь заданий{activeJobs.length > 0 && <span className="nav-count">{activeJobs.length}</span>}</NavLink>}</nav>
     <div className="explorer-header"><span>Курсы</span>{<button className="icon-action" aria-label="Создать курс" title="Создать курс" onClick={() => openCourseDialog()}><Plus size={16} /></button>}</div>
     <nav className="explorer" aria-label="Курсы и конспекты">
@@ -156,16 +159,16 @@ export default function App() {
   return <>
     <a href="#main-content" className="skip-link">К содержимому</a>
     <div className="page app-layout"><div id="quartz-body" className={`workspace-layout ${hasContext ? 'with-context' : ''} ${navCollapsed ? 'nav-collapsed' : ''}`}>
-      <ActivityRail basePath={basePath} queueCount={activeJobs.length} section={isNew ? 'create' : isQueue ? 'queue' : 'library'} onCreate={() => startNew()} onSearch={focusSearch} onHelp={() => setHelp(true)} />
+      <ActivityRail basePath={basePath} queueCount={activeJobs.length} section={isNew ? 'create' : isQueue ? 'queue' : isSettings ? 'settings' : 'library'} onCreate={() => startNew()} onSearch={focusSearch} onHelp={() => setHelp(true)} />
       <aside className="sidebar left desktop-sidebar">{sidebar}</aside>
       <main className={`center main-content ${activeNote ? `reader-page reader-${state.readerTheme}` : ''}`} id="main-content">
-        <WorkspaceHeader collapsed={navCollapsed} onToggleNavigation={() => setNavCollapsed(!navCollapsed)} label={activeNote ? `${activeNote.title}.md` : isNew ? 'Сгенерировать конспект' : isQueue ? 'Очередь заданий' : isSettings ? 'Настройки' : activeCourse?.title ?? 'Библиотека'} mode={activeNote ? isEditing ? 'Редактирование' : 'Чтение' : 'Библиотека'} onOpenNavigation={() => setMobileNav(true)} breadcrumbs={<><Link to={basePath || '/'}>{spaceLabel(space)}</Link>{activeCourse && <><ChevronRight size={12} />{activeNote ? <Link to={`${basePath}/courses/${activeCourse.id}`}>{activeCourse.title}</Link> : <span>{activeCourse.title}</span>}</>}{!activeCourse && (isNew || isQueue || isSettings) && <><ChevronRight size={12} /><span>{isNew ? 'Новый конспект' : isSettings ? 'Настройки' : 'Очередь заданий'}</span></>}</>} actions={activeNote && !isEditing ? <ReaderActions note={activeNote} contextAvailable={Boolean(activeNote.jobId || /^#{2,4}\s/m.test(activeNote.markdown))} onEdit={activeCourse?.role !== 'viewer' ? () => navigate(`/notes/${activeNote.id}/edit`) : undefined} onDelete={activeCourse?.role !== 'viewer' ? () => { if (window.confirm('Удалить эту заметку? Это действие нельзя отменить.')) void library.deleteNote(activeNote.id).then(() => navigate(`/courses/${activeNote.courseId}`)).catch(library.reportError) } : undefined} theme={state.readerTheme} onToggleTheme={toggleTheme} contextOpen={contextOpen} onToggleContext={() => setContextOpen(!contextOpen)} /> : undefined} />
+        <WorkspaceHeader collapsed={navCollapsed} onToggleNavigation={() => setNavCollapsed(!navCollapsed)} label={activeNote ? `${activeNote.title}.md` : isNew ? 'Сгенерировать конспект' : isQueue ? 'Очередь заданий' : isSettings ? 'Настройки' : activeCourse?.title ?? 'Библиотека'} mode={activeNote ? isEditing ? 'Редактирование' : 'Чтение' : ''} onOpenNavigation={() => setMobileNav(true)} breadcrumbs={<><Link to={basePath || '/'}>{spaceLabel(space)}</Link>{activeCourse && <><ChevronRight size={12} />{activeNote ? <Link to={`${basePath}/courses/${activeCourse.id}`}>{activeCourse.title}</Link> : <span>{activeCourse.title}</span>}</>}{!activeCourse && (isNew || isQueue || isSettings) && <><ChevronRight size={12} /><span>{isNew ? 'Новый конспект' : isSettings ? 'Настройки' : 'Очередь заданий'}</span></>}</>} actions={activeNote && !isEditing ? <ReaderActions note={activeNote} contextAvailable={Boolean(activeNote.jobId || /^#{2,4}\s/m.test(activeNote.markdown))} onEdit={activeCourse?.role !== 'viewer' ? () => navigate(`/notes/${activeNote.id}/edit`) : undefined} onDelete={activeCourse?.role !== 'viewer' ? () => { if (window.confirm('Удалить эту заметку? Это действие нельзя отменить.')) void library.deleteNote(activeNote.id).then(() => navigate(`/courses/${activeNote.courseId}`)).catch(library.reportError) } : undefined} theme={state.readerTheme} onToggleTheme={toggleTheme} contextOpen={contextOpen} onToggleContext={() => setContextOpen(!contextOpen)} /> : undefined} />
         {library.getError() && <div className="storage-error" role="alert">{library.getError()}</div>}
         <div className="content-body">
           <Routes>
             <Route path="/" element={<LibraryPage state={state} courses={courses} search={search} createCourse={() => openCourseDialog()} startNew={startNew} />} />
             <Route path="/courses/:id" element={<CoursePage state={state} startNew={startNew} />} />
-            <Route path="/new" element={<NewNotePage state={state} createCourse={() => { setNewIntent('generate'); openCourseDialog(true) }} />} />
+            <Route path="/new" element={<CreateNotePage state={state} createCourse={() => { setNewIntent('generate'); openCourseDialog(true) }} />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/queue" element={<QueuePage state={state} startNew={() => startNew()} />} />
             <Route path="/notes/:id/edit" element={activeNote && activeNote.contentLoaded === false ? <p role="status">Открываем заметку…</p> : activeNote ? <Suspense fallback={<p role="status">Открываем редактор…</p>}><NoteEditor key={activeNote.id} note={activeNote} canEdit={activeCourse?.role !== 'viewer'} /></Suspense> : <NotFound />} />
@@ -177,7 +180,7 @@ export default function App() {
       {hasContext && <aside className="sidebar right context-sidebar">{activeNote ? <ReaderInspector key={activeNote.id} markdown={activeNote.markdown} source={state.jobs.some(j => j.id === activeNote.jobId) ? <SourceDetails note={activeNote} state={state} /> : null} /> : <JobSteps job={selectedJob} />}</aside>}
     </div></div>
     <Dialog open={newDialog} onOpenChange={setNewDialog} title="Новый" description="Создать заметку вручную или получить конспект из видео"><div className="new-menu">{courses.some(c => c.role !== 'viewer') && <><label className="field-label" htmlFor="new-course">Курс</label><select id="new-course" value={newCourseId} onChange={e => setNewCourseId(e.target.value)}>{courses.filter(c => c.role !== 'viewer').map(c => <option key={c.id} value={c.id}>{c.title}</option>)}</select></>}<Button variant="outline" disabled={creating} onClick={() => void chooseNew('manual')}><FileText size={17} />Создать заметку</Button><Button variant="outline" disabled={creating} onClick={() => void chooseNew('generate')}><Upload size={17} />Сгенерировать конспект</Button>{!courses.some(c => c.role !== 'viewer') && <p className="field-hint">Сначала предложим создать курс.</p>}{newError && <p className="field-error" role="alert">{newError}</p>}</div></Dialog>
-    <Dialog open={mobileNav} onOpenChange={setMobileNav} title="Навигация" description="Пространства, курсы и конспекты" className="mobile-sidebar-dialog"><div className="mobile-sidebar-content">{sidebar}</div></Dialog>
+    <Dialog open={mobileNav} onOpenChange={setMobileNav} title="Навигация" description="Пространства, курсы и конспекты" className="mobile-sidebar-dialog"><div className="mobile-sidebar-content" onClick={event => { if ((event.target as HTMLElement).closest('a[href]')) setMobileNav(false) }}>{sidebar}</div></Dialog>
     <Dialog open={courseDialog} onOpenChange={setCourseDialog} title={courses.length ? 'Новый курс' : 'Первый курс'} description={spaceLabel(space)}><form onSubmit={submitCourse} className="course-form"><label className="field-label" htmlFor="course-title">Название курса</label><input id="course-title" autoFocus maxLength={80} placeholder="Например, Распределённые системы" value={courseTitle} onChange={e => { setCourseTitle(e.target.value); setCourseError('') }} aria-invalid={!!courseError} aria-describedby={courseError ? 'course-error' : undefined} />{courseError && <p id="course-error" className="field-error" role="alert">{courseError}</p>}<div className="dialog-actions"><Button type="button" variant="ghost" onClick={() => setCourseDialog(false)}>Отмена</Button><Button type="submit">Создать курс</Button></div></form></Dialog>
     <Dialog open={help} onOpenChange={setHelp} title="Как это работает" description="Заметки и конспекты"><div className="help-content"><ol><li>Создайте курс.</li><li>Выберите ручную заметку или генерацию из видео.</li><li>Дождитесь завершения задания в очереди.</li><li>Откройте конспект и скачайте Markdown.</li></ol><p>Для генерации подключите провайдера в настройках, затем загрузите видео и при необходимости PDF. Расшифровка и текст слайдов передаются выбранной модели. Ручные заметки не требуют подключения.</p><p>«Новый» также создаёт пустую заметку без генерации. Сохранённые документы хранятся на сервере; несохранённые черновики — в этом браузере. </p><Button variant="outline" onClick={() => setHelp(false)}>Понятно</Button></div></Dialog>
   </>
@@ -204,88 +207,7 @@ function CoursePage({ state, startNew, basePath = '' }: { state: AppState; start
   if (!course) return <NotFound />
   const notes = state.notes.filter(n => n.courseId === id)
   const pending = state.jobs.filter(j => j.courseId === id && (j.status === 'queued' || isActive(j)))
-  return <><PageHeading title={course.title} description={`${plural(notes.length, ['конспект', 'конспекта', 'конспектов'])} · ${basePath ? 'Демонстрационные материалы' : spaceLabel(course.workspace)}`} action={<div className="page-actions">{course.role === 'owner' && <Button size="sm" variant="ghost" onClick={() => { if (window.confirm('Удалить курс со всеми заметками и материалами? Это действие нельзя отменить.')) void library.deleteCourse(course.id).then(() => navigate('/')).catch(library.reportError) }}>Удалить курс</Button>}{!basePath && course.workspace === 'shared' && <CourseMembers course={course} />}{startNew && course.role !== 'viewer' && <Button size="sm" onClick={() => startNew(course.id)}><Plus size={15} />Новый</Button>}</div>} />{pending.length > 0 && <Link to="/queue" className="pending-notice"><LoaderCircle size={16} className="spin" />{plural(pending.length, ['задание', 'задания', 'заданий'])} в обработке<ArrowRight size={15} /></Link>}{notes.length ? <NoteTable notes={notes.slice().reverse()} basePath={basePath} /> : <div className="quiet-empty course-empty"><p>В курсе пока нет заметок.</p>{startNew && course.role !== 'viewer' && <Button variant="outline" size="sm" onClick={() => startNew(course.id)}>Новый<Plus size={15} /></Button>}</div>}</>
-}
-
-type Draft = { courseId: string; title: string; sourceType: 'file' | 'url'; url: string; file?: { name: string; size: number }; pdfName?: string; preset: 'lecture' | 'seminar'; length: JobInput['length']; instructions: string; mode: 'real' | 'mock'; language: 'ru' | 'en' | 'auto' } & GenerationOptions
-function NewNotePage({ state, createCourse }: { state: AppState; createCourse: () => void }) {
-  const writableCourses = useMemo(() => state.courses.filter(course => course.role !== 'viewer'), [state.courses])
-  const [params, setParams] = useSearchParams()
-  const navigate = useNavigate()
-  const session = useSession()
-  const DRAFT_KEY = `lecturevault.generation-draft.${session.user?.id}`
-  const [draft, setDraft] = useState<Draft>(() => {
-    let saved: Partial<Draft> = {}
-    try { saved = JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}') } catch { /* use empty draft */ }
-    return { title: '', url: '', preset: 'lecture', length: 'medium', instructions: '', language: 'ru', ...defaultGeneration, ...saved, mode: 'real', sourceType: 'file', courseId: [params.get('course'), saved.courseId, writableCourses[0]?.id].find(id => writableCourses.some(course => course.id === id)) ?? '' }
-  })
-  const [errors, setErrors] = useState<Record<string, string>>({})
-  const [dragging, setDragging] = useState(false)
-  const fileInput = useRef<HTMLInputElement>(null)
-  const pdfInput = useRef<HTMLInputElement>(null)
-  const submitLock = useRef(false)
-  const videoFile = useRef<File | undefined>(undefined)
-  const pdfFile = useRef<File | undefined>(undefined)
-  const [submitting, setSubmitting] = useState(false)
-  const [canGenerate, setCanGenerate] = useState(false)
-  useEffect(() => { try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)) } catch { /* metadata can still be submitted */ } }, [draft])
-  useEffect(() => {
-    const courseId = params.get('course')
-    if (courseId && writableCourses.some(course => course.id === courseId)) {
-      setDraft(previous => previous.courseId === courseId ? previous : { ...previous, courseId })
-      setErrors(previous => previous.courseId ? { ...previous, courseId: '' } : previous)
-    }
-  }, [params, writableCourses])
-  const change = <K extends keyof Draft>(key: K, value: Draft[K]) => { setDraft(prev => ({ ...prev, [key]: value })); setErrors(prev => ({ ...prev, [key]: '' })) }
-  function chooseFile(file?: File) {
-    if (!file) return
-    if (!/\.(mp4|mkv|mov|webm)$/i.test(file.name)) { setErrors(prev => ({ ...prev, source: 'Выберите видео MP4, MKV, MOV или WebM.' })); return }
-    if (!file.size || file.size > 512 * 1024 * 1024) { setErrors(prev => ({ ...prev, source: 'Выберите непустое видео размером до 512 МБ.' })); return }
-    videoFile.current = file
-    setDraft(prev => ({ ...prev, file: { name: file.name, size: file.size }, title: prev.title || file.name.replace(/\.[^.]+$/, '').replace(/[_]/g, ' ') }))
-    setErrors(prev => ({ ...prev, source: '' }))
-  }
-  function choosePdf(file?: File) {
-    if (!file) return
-    if (!/\.pdf$/i.test(file.name) || !file.size || file.size > 50 * 1024 * 1024) { setErrors(prev => ({ ...prev, pdf: 'Выберите непустую PDF-презентацию размером до 50 МБ.' })); return }
-    pdfFile.current = file
-    change('pdfName', file.name); setErrors(prev => ({ ...prev, pdf: '' }))
-  }
-  async function submit(e: FormEvent) {
-    e.preventDefault()
-    if (submitLock.current) return
-    const next: Record<string, string> = {}
-    if (!writableCourses.some(c => c.id === draft.courseId)) next.courseId = 'Выберите курс для конспекта.'
-    if (errors.pdf) next.pdf = errors.pdf
-    if (!canGenerate) next.provider = 'Подключите выбранного провайдера в настройках перед генерацией.'
-    if (!draft.title.trim()) next.title = 'Введите название конспекта.'
-    if (draft.sourceType === 'file' && !videoFile.current) next.source = 'Выберите видеофайл для загрузки. После обновления страницы файл нужно выбрать заново.'
-    if (draft.pdfName && !pdfFile.current) next.pdf = 'Повторно выберите PDF для загрузки или удалите вложение.'
-    if (draft.mode === 'real' && draft.sourceType === 'url') next.source = 'Обработка ссылок отключена. Загрузите локальное видео.'
-    if (draft.sourceType === 'url') { const error = validateUrl(draft.url.trim()); if (error) next.source = error }
-    setErrors(next)
-    if (Object.keys(next).length) { document.querySelector<HTMLElement>(next.courseId ? '#note-course' : next.title ? '#note-title' : next.source ? draft.sourceType === 'url' ? '#source-url' : '.dropzone' : next.provider ? '#generation-provider' : '.attach-button, .pdf-chip button')?.focus(); return }
-    submitLock.current = true; setSubmitting(true)
-    try {
-    const id = await library.createJob({ courseId: draft.courseId, title: draft.title.trim(), sourceType: draft.sourceType, sourceName: draft.sourceType === 'file' ? draft.file!.name : draft.url.trim(), sourceSize: draft.file?.size, pdfName: draft.pdfName, preset: draft.preset, length: draft.length, instructions: draft.instructions.trim(), timestamps: false, mode: draft.mode, language: draft.language, provider: draft.provider, model: draft.model, effort: draft.effort }, draft.sourceType === 'file' ? videoFile.current : undefined, pdfFile.current)
-    try { localStorage.removeItem(DRAFT_KEY) } catch { /* successful upload is already persisted */ }
-    navigate(`/queue?job=${id}`)
-    } catch (error) { setErrors(previous => ({ ...previous, [error instanceof ApiError && ['pdf', 'provider'].includes(error.field ?? '') ? error.field! : 'source']: (error as Error).message })) }
-    finally { submitLock.current = false; setSubmitting(false) }
-  }
-  if (!writableCourses.length) return <><PageHeading title="Новый конспект" description="Сначала создайте курс." /><Button onClick={createCourse}><Plus size={16} />Создать курс</Button></>
-  return <><PageHeading title="Сгенерировать конспект" /><form className="note-form" onSubmit={submit} noValidate>
-    <div className="form-section"><div className="form-section-title"><span>01</span><h2>Источник</h2></div>
-      <div id="source-panel">{draft.sourceType === 'file' ? <><input className="sr-only" type="file" id="video-file" aria-describedby={errors.source ? 'source-error' : undefined} ref={fileInput} accept=".mp4,.mkv,.mov,.webm" onChange={e => chooseFile(e.target.files?.[0])} />{draft.file ? <div className="selected-file"><div className="file-icon"><FileText size={23} /></div><span><strong title={draft.file.name}>{draft.file.name}</strong><small>{draft.file.size < 1024 * 1024 ? `${Math.max(1, Math.ceil(draft.file.size / 1024))} КБ` : `${(draft.file.size / 1024 / 1024).toFixed(1)} МБ`} · {videoFile.current ? 'видео выбрано' : 'выберите файл повторно'}</small></span><button type="button" className="icon-action" aria-label="Выбрать видео заново" title="Выбрать видео заново" onClick={() => fileInput.current?.click()}><Upload size={17} /></button><button type="button" className="icon-action" aria-label="Убрать видео" onClick={() => { change('file', undefined); videoFile.current = undefined; if (fileInput.current) fileInput.current.value = '' }}><X size={17} /></button></div> : <button type="button" className={`dropzone ${dragging ? 'dragging' : ''}`} aria-invalid={!!errors.source} aria-describedby={errors.source ? 'source-error' : undefined} onClick={() => fileInput.current?.click()} onDragOver={e => { e.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={e => { e.preventDefault(); setDragging(false); chooseFile(e.dataTransfer.files[0]) }}><span className="upload-icon"><Upload size={23} strokeWidth={1.4} /></span><strong>Перетащите видео сюда</strong><span>или <em>выберите файл</em> на устройстве</span><small>MP4, MKV, MOV, WebM · до 512 МБ</small></button>}</> : <div><label className="field-label" htmlFor="source-url">Ссылка на видео</label><div className="url-input"><Link2 size={17} /><input id="source-url" type="url" maxLength={2048} placeholder="https://www.youtube.com/watch?v=…" value={draft.url} onChange={e => { change('url', e.target.value); setErrors(prev => ({ ...prev, source: '' })) }} aria-invalid={!!errors.source} aria-describedby={errors.source ? 'source-error source-hint' : 'source-hint'} /></div><p className="field-hint" id="source-hint">Ссылки доступны только в режиме демо и не загружаются.</p></div>}
-      {errors.source && <p id="source-error" className="field-error" role="alert">{errors.source}</p>}</div>
-      <input className="sr-only" type="file" ref={pdfInput} accept=".pdf" aria-label="PDF-презентация" aria-invalid={!!errors.pdf} aria-describedby={errors.pdf ? 'pdf-error' : undefined} onChange={e => choosePdf(e.target.files?.[0])} />{draft.pdfName ? <div className="pdf-chip"><Paperclip size={15} /><span title={draft.pdfName}>{draft.pdfName}{!pdfFile.current && <button type="button" className="inline-action" onClick={() => pdfInput.current?.click()}>Выбрать PDF повторно</button>}</span><button type="button" className="icon-action" aria-label="Убрать PDF" onClick={() => { change('pdfName', undefined); pdfFile.current = undefined; setErrors(previous => ({ ...previous, pdf: '' })); if (pdfInput.current) pdfInput.current.value = '' }}><X size={14} /></button></div> : <button type="button" className="attach-button" onClick={() => pdfInput.current?.click()}><Paperclip size={15} />Добавить PDF-презентацию<span>необязательно</span></button>}{errors.pdf && <p id="pdf-error" className="field-error" role="alert">{errors.pdf}</p>}
-    </div>
-    <div className="form-section"><div className="form-section-title"><span>02</span><h2>Настройки конспекта</h2></div><div className="field-group"><label className="field-label" htmlFor="note-title">Название</label><input id="note-title" maxLength={120} placeholder="Например, Лекция 1. Введение в курс" value={draft.title} onChange={e => change('title', e.target.value)} aria-invalid={!!errors.title} aria-describedby={errors.title ? 'note-title-error' : undefined} />{errors.title && <p id="note-title-error" className="field-error" role="alert">{errors.title}</p>}</div><div className="field-group"><div className="field-label-row"><label className="field-label" htmlFor="note-course">Сохранить в курс</label><button type="button" className="inline-action" onClick={createCourse}>Создать курс</button></div><div className="course-select"><Folder size={16} /><select id="note-course" value={draft.courseId} aria-invalid={!!errors.courseId} aria-describedby={errors.courseId ? 'note-course-error' : undefined} onChange={e => { change('courseId', e.target.value); setParams({ course: e.target.value }, { replace: true }) }}>{writableCourses.filter(c => c.role !== 'viewer').map(c => <option value={c.id} key={c.id}>{c.title}{c.workspace === 'shared' ? ' · общий' : ''}</option>)}</select><ChevronDown size={14} /></div>{errors.courseId && <p id="note-course-error" className="field-error" role="alert">{errors.courseId}</p>}</div>
-      {draft.mode === 'real' && <div><ProviderOptions onAvailabilityChange={setCanGenerate} value={draft} onChange={value => { setDraft(previous => ({ ...previous, ...value })); setErrors(previous => ({ ...previous, provider: '' })) }} />{errors.provider && <p className="field-error" role="alert">{errors.provider}</p>}</div>}<fieldset><legend className="field-label">Формат материала</legend><div className="preset-grid"><button type="button" aria-pressed={draft.preset === 'lecture'} onClick={() => change('preset', 'lecture')}><BookOpen size={19} /><span><strong>Лекция</strong><small>Теория, понятия и выводы</small></span>{draft.preset === 'lecture' && <CheckCircle2 size={16} className="preset-check" />}</button><button type="button" aria-pressed={draft.preset === 'seminar'} onClick={() => change('preset', 'seminar')}><FileText size={19} /><span><strong>Семинар</strong><small>Задачи, примеры и решения</small></span>{draft.preset === 'seminar' && <CheckCircle2 size={16} className="preset-check" />}</button></div></fieldset>
-      <fieldset><legend className="field-label">Объём</legend><div className="length-options">{(['short', 'medium', 'detailed'] as const).map(length => <button key={length} type="button" aria-pressed={draft.length === length} onClick={() => change('length', length)}>{LENGTH_LABELS[length]}</button>)}</div></fieldset>
-      <div className="field-group"><label className="field-label" htmlFor="transcript-language">Язык речи</label><select id="transcript-language" value={draft.language} onChange={e => change('language', e.target.value as Draft['language'])}><option value="ru">Русский</option><option value="en">English</option><option value="auto">Определить автоматически</option></select></div><div className="field-group"><label className="field-label" htmlFor="instructions">Инструкции к конспекту <span>необязательно</span></label><textarea id="instructions" maxLength={4000} rows={3} placeholder="На что обратить внимание? Какие термины и примеры сохранить?" value={draft.instructions} onChange={e => change('instructions', e.target.value)} /></div>
-    </div><div className="form-submit"><p>{draft.mode === 'mock' ? 'Демо: источник не анализируется. Файлы сохранятся локально на сервере.' : `Whisper распознаёт речь локально. Текст передаётся ${draft.provider === 'codex' ? 'Codex' : 'Claude'} в выбранную модель.`}</p><Button type="submit" disabled={submitting}>{submitting ? 'Загружаем…' : 'Создать конспект'}<ArrowRight size={17} /></Button></div>
-  </form></>
+  return <><PageHeading title={course.title} description={`${plural(notes.length, ['конспект', 'конспекта', 'конспектов'])} · ${basePath ? 'Демонстрационные материалы' : spaceLabel(course.workspace)}`} action={<div className="page-actions">{course.role === 'owner' && <ActionMenu label="Действия курса"><Button size="sm" variant="ghost" className="danger-action" onClick={() => { if (window.confirm('Удалить курс со всеми заметками и материалами? Это действие нельзя отменить.')) void library.deleteCourse(course.id).then(() => navigate('/')).catch(library.reportError) }}>Удалить курс</Button></ActionMenu>}{!basePath && course.workspace === 'shared' && <CourseMembers course={course} />}{startNew && course.role !== 'viewer' && <Button size="sm" onClick={() => startNew(course.id)}><Plus size={15} />Новый</Button>}</div>} />{pending.length > 0 && <Link to="/queue" className="pending-notice"><LoaderCircle size={16} className="spin" />{plural(pending.length, ['задание', 'задания', 'заданий'])} в обработке<ArrowRight size={15} /></Link>}{notes.length ? <NoteTable notes={notes.slice().reverse()} basePath={basePath} /> : <div className="quiet-empty course-empty"><p>В курсе пока нет заметок.</p>{startNew && course.role !== 'viewer' && <Button variant="outline" size="sm" onClick={() => startNew(course.id)}>Новый<Plus size={15} /></Button>}</div>}</>
 }
 
 function Status({ job }: { job: Job }) {
@@ -299,8 +221,8 @@ function QueuePage({ state, startNew }: { state: AppState; startNew: () => void 
   const jobs = state.jobs.filter(j => filter === 'all' || (filter === 'ready' ? j.status === 'ready' : j.status === 'queued' || isActive(j))).slice().reverse()
   const selectedJob = state.jobs.find(j => j.id === params.get('job')) ?? state.jobs.find(isActive) ?? state.jobs.at(-1)
   return <><PageHeading title="Очередь заданий" /><div className="queue-toolbar"><TabBar label="Фильтр заданий" panelId="queue-results" className="queue-tabs" value={filter} onValueChange={setFilter} items={(['all', 'active', 'ready'] as const).map(value => ({ value, label: <>{{ all: 'Все', active: 'В работе', ready: 'Готовые' }[value]}<span>{state.jobs.filter(j => value === 'all' || (value === 'ready' ? j.status === 'ready' : isActive(j) || j.status === 'queued')).length}</span></> }))} /><span className="queue-mode"><span className="demo-dot" />Последовательно</span></div><div aria-live="polite" className="sr-only">{selectedJob ? `${selectedJob.title}: ${STATUS_LABELS[selectedJob.status]}` : 'Очередь пуста'}</div>
-    <div id="queue-results" role="tabpanel" aria-labelledby={`queue-results-${filter}-tab`}>{!jobs.length ? <div className="quiet-empty"><ListOrdered size={34} strokeWidth={1.3} /><h2>{state.jobs.length ? 'Здесь пока нет заданий' : 'Очередь пуста'}</h2><p>{state.jobs.length ? 'Выберите другой фильтр или создайте новый конспект.' : 'Загрузите видео, чтобы создать задание.'}</p><Button variant="outline" onClick={startNew}>Новый конспект<Plus size={16} /></Button></div> : <div className="job-list">{jobs.map(job => <div className={`job-item ${job.id === selectedJob?.id ? 'selected' : ''}`} key={job.id}><div className={`job-file-icon ${job.status === 'ready' ? 'job-file-ready' : ''}`}>{job.status === 'ready' ? <FileText size={21} strokeWidth={1.4} /> : job.sourceType === 'url' ? <Link2 size={20} /> : <BookOpen size={21} strokeWidth={1.4} />}</div><div className="job-content"><button title={`${job.title} — источник: ${job.sourceName}`} className="job-title" onClick={() => setParams({ job: job.id })}>{job.title}</button><p>{state.courses.find(c => c.id === job.courseId)?.title} <span>·</span> {job.preset === 'lecture' ? 'Лекция' : 'Семинар'} <span>·</span> {LENGTH_LABELS[job.length]} <span>·</span> {job.mode === 'real' ? `Whisper + ${job.provider === 'claude' ? 'Claude' : 'Codex'}` : 'Демо'}</p><Status job={job} />{job.error && <p className="job-error">{job.error}</p>}</div><div className="job-actions">{job.status === 'ready' && job.noteId && state.notes.some(note => note.id === job.noteId) && <Button asChild size="sm" variant="outline"><Link to={`/notes/${job.noteId}`}>Открыть<ArrowRight size={14} /></Link></Button>}{job.status === 'queued' && job.createdBy === session.user?.id && <Button size="sm" variant="ghost" onClick={() => void library.cancel(job.id).catch(library.reportError)}>Отменить</Button>}{job.status === 'failed' && job.createdBy === session.user?.id && <Button size="sm" variant="outline" onClick={() => void library.retry(job.id).catch(library.reportError)}>Повторить</Button>}{job.status === 'ready' && !job.noteId && <span className="field-hint">Результат удалён</span>}</div></div>)}</div>}
-    </div><div className="queue-footnote"><Clock3 size={15} /><p>Задания выполняются по одному и сохраняются на сервере. Демо отмечено отдельно; реальная обработка не заменяется демонстрацией.</p></div><div className="mobile-context"><JobSteps job={selectedJob} /></div>
+    <div id="queue-results" role="tabpanel" aria-labelledby={`queue-results-${filter}-tab`}>{!jobs.length ? <div className="quiet-empty"><ListOrdered size={20} strokeWidth={1.5} /><h2>{state.jobs.length ? 'Здесь пока нет заданий' : 'Очередь пуста'}</h2><p>{state.jobs.length ? 'Выберите другой фильтр или создайте новый конспект.' : 'Загрузите видео, чтобы создать задание.'}</p><Button variant="outline" onClick={startNew}>Новый конспект<Plus size={16} /></Button></div> : <div className="job-list">{jobs.map(job => <div className={`job-item ${job.id === selectedJob?.id ? 'selected' : ''}`} key={job.id}><div className={`job-file-icon ${job.status === 'ready' ? 'job-file-ready' : ''}`}>{job.status === 'ready' ? <FileText size={21} strokeWidth={1.4} /> : job.sourceType === 'url' ? <Link2 size={20} /> : <BookOpen size={21} strokeWidth={1.4} />}</div><div className="job-content"><button title={`${job.title} — источник: ${job.sourceName}`} className="job-title" onClick={() => setParams({ job: job.id })}>{job.title}</button><p>{state.courses.find(c => c.id === job.courseId)?.title} <span>·</span> {job.preset === 'lecture' ? 'Лекция' : 'Семинар'} <span>·</span> {LENGTH_LABELS[job.length]} <span>·</span> {job.mode === 'real' ? `Whisper + ${job.provider === 'claude' ? 'Claude' : 'Codex'}` : 'Демо'}</p><Status job={job} />{job.error && <p className="job-error">{job.error}</p>}</div><div className="job-actions">{job.status === 'ready' && job.noteId && state.notes.some(note => note.id === job.noteId) && <Button asChild size="sm" variant="outline"><Link to={`/notes/${job.noteId}`}>Открыть<ArrowRight size={14} /></Link></Button>}{job.status === 'queued' && job.createdBy === session.user?.id && <Button size="sm" variant="ghost" onClick={() => void library.cancel(job.id).catch(library.reportError)}>Отменить</Button>}{job.status === 'failed' && job.createdBy === session.user?.id && <Button size="sm" variant="outline" onClick={() => void library.retry(job.id).catch(library.reportError)}>Повторить</Button>}{job.status === 'ready' && !job.noteId && <span className="field-hint">Результат удалён</span>}</div></div>)}</div>}
+    </div><div className="queue-footnote"><Clock3 size={15} /><p>Обработка продолжается, когда вы переходите на другой экран. Ожидающее задание можно отменить, ошибку — повторить.</p></div><div className="mobile-context"><JobSteps job={selectedJob} /></div>
   </>
 }
 
@@ -312,13 +234,13 @@ function ReaderPage({ state, basePath = '' }: { state: AppState; basePath?: stri
   if (!note) return <NotFound />
   if (note.contentLoaded === false) return <p role="status">Открываем заметку…</p>
   const job = state.jobs.find(j => j.id === note.jobId)
-  return <><div className="reader-heading"><div className="reader-kicker">{note.origin === 'manual' ? 'ЗАМЕТКА' : job?.preset === 'seminar' ? 'СЕМИНАР' : 'ЛЕКЦИЯ'}</div><h1>{note.title}</h1><div className="reader-info"><div className="reader-meta"><span>{note.origin === 'manual' ? 'Заметка' : job?.preset === 'seminar' ? 'Семинар' : 'Лекция'}</span><span>·</span><time dateTime={new Date(note.createdAt).toISOString()}>{formatDate(note.createdAt)}</time><span>·</span><span>{basePath ? 'Демонстрационный материал' : note.origin === 'manual' ? `Ручная заметка · редакция ${note.revision ?? 1}` : note.isMock ? 'Mock-результат' : `Whisper · ${job?.provider === 'claude' ? 'Claude' : 'Codex'} · редакция ${note.revision ?? 1}`}</span></div></div></div>{!basePath && note.isMock && <p className="reader-demo">Учебный пример. Содержимое источника не анализировалось.</p>}{/^#{2,4}\s/m.test(note.markdown) && <div className="mobile-toc"><button aria-expanded={mobileToc} onClick={() => setMobileToc(!mobileToc)}><ListOrdered size={16} />Оглавление<ChevronDown size={15} /></button>{mobileToc && <div onClick={event => { if ((event.target as HTMLElement).closest('a')) setMobileToc(false) }}><QuartzToc markdown={note.markdown} /></div>}</div>}<QuartzArticle markdown={note.markdown} /><div className="mobile-context"><SourceDetails note={note} state={state} /></div><Link className="back-link" to={`${basePath}/courses/${note.courseId}`}><ArrowLeft size={15} />К курсу</Link></>
+  return <><div className="reader-heading"><h1>{note.title}</h1><div className="reader-info"><div className="reader-meta"><time dateTime={new Date(note.createdAt).toISOString()}>{formatDate(note.createdAt)}</time>{note.origin !== 'manual' && <span>{note.isMock ? 'Учебный пример' : `Из видео · ${job?.provider === 'claude' ? 'Claude' : 'Codex'}`}</span>}</div></div></div>{!basePath && note.isMock && <p className="reader-demo">Учебный пример. Содержимое источника не анализировалось.</p>}{/^#{2,4}\s/m.test(note.markdown) && <div className="mobile-toc"><button aria-expanded={mobileToc} onClick={() => setMobileToc(!mobileToc)}><ListOrdered size={16} />Оглавление<ChevronDown size={15} /></button>{mobileToc && <div onClick={event => { if ((event.target as HTMLElement).closest('a')) setMobileToc(false) }}><QuartzToc markdown={note.markdown} /></div>}</div>}<QuartzArticle markdown={note.markdown} /><div className="mobile-context"><SourceDetails note={note} state={state} /></div><Link className="back-link" to={`${basePath}/courses/${note.courseId}`}><ArrowLeft size={15} />К курсу</Link></>
 }
 
 function SourceDetails({ note, state }: { note: Note; state: AppState }) {
   const job = state.jobs.find(j => j.id === note.jobId)
   if (!job) return null
-  return <details className="source-details" open><summary>Об источнике<ChevronDown size={13} /></summary><dl><dt>{job.sourceType === 'file' ? 'Видеофайл' : 'Ссылка'}</dt><dd title={job.sourceName}>{job.sourceAssetId ? <a href={`/api/assets/${job.sourceAssetId}`} download>{job.sourceName}</a> : job.sourceName}</dd><dt>Параметры</dt><dd>{job.preset === 'lecture' ? 'Лекция' : 'Семинар'} · {LENGTH_LABELS[job.length]}</dd>{job.pdfName && <><dt>Презентация</dt><dd title={job.pdfName}>{job.pdfAssetId ? <a href={`/api/assets/${job.pdfAssetId}`} download>{job.pdfName}</a> : job.pdfName}<small>{job.mode === 'real' ? 'Текст слайдов включён в конспект.' : 'Выбрана для демо, не анализировалась.'}</small></dd></>}{job.instructions && <><dt>Инструкции</dt><dd>{job.instructions}</dd></>}</dl></details>
+  return <details className="source-details" open><summary>Об источнике<ChevronDown size={13} /></summary><dl><dt>{job.sourceType === 'file' ? 'Видеофайл' : 'Ссылка'}</dt><dd title={job.sourceName}>{job.sourceAssetId ? <a href={`/api/assets/${job.sourceAssetId}`} download>{job.sourceName}</a> : job.sourceName}</dd><dt>Параметры</dt><dd>{job.preset === 'lecture' ? 'Лекция' : 'Семинар'} · {LENGTH_LABELS[job.length]}</dd>{job.pdfName && <><dt>Презентация</dt><dd title={job.pdfName}>{job.pdfAssetId ? <a href={`/api/assets/${job.pdfAssetId}`} download>{job.pdfName}</a> : job.pdfName}<small>{job.mode === 'real' ? 'Текст слайдов передан модели.' : 'Выбрана для демо, не анализировалась.'}</small></dd></>}{job.instructions && <><dt>Инструкции</dt><dd>{job.instructions}</dd></>}</dl></details>
 }
 
 function JobSteps({ job }: { job?: Job }) {
