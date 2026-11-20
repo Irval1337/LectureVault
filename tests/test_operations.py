@@ -1,5 +1,6 @@
 import io
 import os
+import sqlite3
 import tarfile
 
 import pytest
@@ -7,8 +8,35 @@ from fastapi.testclient import TestClient
 
 from backend.api import create_app
 from backend.manage import backup, restore
+from backend.db import connect
 from tests.test_api import HEADERS, PASSWORD, register, course, note, settings_at
 from tests.test_auth import token_for
+
+
+def test_archive_itself_clears_session_and_mail_credentials(tmp_path):
+    settings = settings_at(tmp_path / 'source')
+    with TestClient(create_app(settings), headers=HEADERS) as client:
+        user = register(client)
+        client.post('/api/auth/forgot-password', json={'email': user['email']}).raise_for_status()
+        with connect(settings) as db:
+            db.execute('INSERT INTO provider_links VALUES (?)', (user['id'],))
+            original_hash = db.execute('SELECT password_hash FROM users').fetchone()[0]
+            token_digest = db.execute('SELECT digest FROM auth_tokens').fetchone()[0]
+            mail_payload = db.execute('SELECT payload FROM mail_outbox').fetchone()[0]
+        archive = tmp_path / 'backup.tar.gz'
+        backup(settings, archive)
+        assert client.get('/api/state').status_code == 200
+
+    with tarfile.open(archive) as snapshot:
+        database = snapshot.extractfile('data/lecturevault.sqlite3').read()
+    archived = tmp_path / 'archived.sqlite3'
+    archived.write_bytes(database)
+    with sqlite3.connect(archived) as db:
+        for table in ['sessions', 'auth_tokens', 'mail_outbox', 'provider_links']:
+            assert db.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == 0, table
+    assert original_hash.encode() not in database
+    assert token_digest.encode() not in database
+    assert mail_payload.encode() not in database
 
 
 def test_backup_restore_preserves_documents_assets_and_requires_password_recovery(tmp_path):

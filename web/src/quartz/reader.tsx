@@ -21,9 +21,9 @@ const processor = unified().use(remarkParse).use(remarkGfm).use(remarkMath).use(
   .use(rehypeSlug, { prefix: 'section-' })
 
 export type TocEntry = { depth: number; slug: string; text: string }
-export function compileMarkdown(markdown: string) {
+export function compileMarkdown(markdown: string, title?: string) {
   const tree = processor.runSync(processor.parse(markdown)) as Root
-  if (tree.children[0]?.type === 'element' && tree.children[0].tagName === 'h1') tree.children.shift()
+  if (tree.children[0]?.type === 'element' && tree.children[0].tagName === 'h1' && toString(tree.children[0]).trim() === title?.trim()) tree.children.shift()
   const toc: TocEntry[] = []
   visit(tree, 'element', (node: Element) => {
     if (/^h[2-4]$/.test(node.tagName)) toc.push({ depth: Number(node.tagName[1]) - 2, slug: String(node.properties.id), text: toString(node) })
@@ -40,9 +40,9 @@ export function compileMarkdown(markdown: string) {
 const OriginalContent = ContentBody() as FunctionComponent<QuartzComponentProps>
 const OriginalToc = TableOfContents({ layout: 'legacy' }) as FunctionComponent<QuartzComponentProps>
 
-export function QuartzArticle({ markdown }: { markdown: string }) {
+export function QuartzArticle({ markdown, title }: { markdown: string; title: string }) {
   const host = useRef<HTMLDivElement>(null)
-  const compiled = useMemo(() => compileMarkdown(markdown), [markdown])
+  const compiled = useMemo(() => compileMarkdown(markdown, title), [markdown, title])
   useLayoutEffect(() => {
     const element = host.current!
     render(h(OriginalContent, { fileData: {}, tree: compiled.tree } as unknown as QuartzComponentProps), element)

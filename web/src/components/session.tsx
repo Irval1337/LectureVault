@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { BookOpenText } from 'lucide-react'
 import { api, ApiError } from '../data/api'
@@ -17,7 +17,7 @@ export function SessionGate({ children }: { children: ReactNode }) {
     if (session.user && ['/login', '/register'].includes(location.pathname)) return <Navigate to="/" replace />
     return <AuthScreen key={location.pathname} />
   }
-  if (session.user) return children
+  if (session.user) return <Fragment key={session.user.id}>{children}</Fragment>
   return <AuthScreen />
 }
 
@@ -36,7 +36,7 @@ function AuthScreen() {
   const [notice, setNotice] = useState('')
   const [token, setToken] = useState(() => new URLSearchParams(location.hash.slice(1)).get('token') ?? '')
   useEffect(() => {
-    if (location.hash) {
+    if (location.hash && ['/verify-email', '/reset-password'].includes(location.pathname)) {
       setToken(new URLSearchParams(location.hash.slice(1)).get('token') ?? '')
       window.history.replaceState(window.history.state, '', location.pathname)
     }
@@ -52,7 +52,8 @@ function AuthScreen() {
         if (session.emailVerification) navigate('/verify-email', { state: { email } })
         else { await auth.initialize(true); navigate('/') }
       } else if (path === '/login') {
-        await auth.login(email, password); navigate('/')
+        await auth.login(email, password)
+        if (authPaths.includes(location.pathname)) navigate('/', { replace: true })
       } else if (path === '/forgot-password') {
         const result = await api<{ message: string }>('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) })
         setNotice(result.message)
@@ -81,5 +82,5 @@ function AuthScreen() {
 
 export function Privacy() {
   const session = useSession()
-  return <main className="privacy-page"><Link className="brand" to="/"><BookOpenText size={22} />LectureVault</Link><h1>Конфиденциальность</h1><p>LectureVault хранит данные аккаунта, курсы, Markdown-заметки, загруженные материалы и состояние заданий на сервере сервиса. Пароли хранятся в виде хешей Argon2id. Библиотека нового аккаунта пуста.</p><h2>Доступ к материалам</h2><p>Личные курсы доступны владельцу. Общие курсы видят только добавленные участники, с назначенными владельцем правами. Оператор сервера имеет технический доступ к хранилищу и резервным копиям.</p><h2>Генерация</h2><p>Подключение провайдера необязательно. При запуске генерации речь распознаётся на сервере, затем транскрипт, текст PDF и ваши инструкции отправляются выбранному провайдеру. К материалам применяются также условия этого провайдера. Ручные заметки без генерации ему не отправляются.</p><h2>Подключения и браузер</h2><p>Codex использует собственный вход OpenAI по одноразовому коду. Его токены не передаются браузеру LectureVault. Ключ Anthropic API сохраняется зашифрованным и используется только для ваших заданий. Подключения можно удалить в настройках. Браузер хранит сессионную cookie, ваши несохранённые черновики и настройки интерфейса; аналитические и рекламные cookies не используются.</p><h2>Удаление</h2><p>Заметки и курсы можно удалить в библиотеке. Удаление аккаунта в настройках удаляет его личные материалы, принадлежащие ему общие курсы и подключения. Резервные копии могут сохраняться в пределах срока, установленного оператором; данные из них не возвращаются в рабочий аккаунт автоматически.</p>{session.supportEmail && <p>Вопросы о данных: <a href={`mailto:${session.supportEmail}`}>{session.supportEmail}</a>.</p>}<Link to="/">Вернуться в LectureVault</Link></main>
+  return <main className="privacy-page"><Link className="brand" to="/"><BookOpenText size={22} />LectureVault</Link><h1>Конфиденциальность</h1><p>LectureVault хранит данные аккаунта, курсы, Markdown-заметки, загруженные материалы и состояние заданий на сервере сервиса. Пароли хранятся в виде хешей Argon2id. Библиотека нового аккаунта пуста.</p><h2>Доступ к материалам</h2><p>Личные курсы доступны владельцу. Общие курсы видят только добавленные участники, с назначенными владельцем правами. Оператор сервера имеет технический доступ к хранилищу и резервным копиям.</p><h2>Генерация</h2><p>Подключение провайдера необязательно. При запуске генерации речь распознаётся на сервере, затем транскрипт, текст PDF и ваши инструкции отправляются выбранному провайдеру. К материалам применяются также условия этого провайдера. Ручные заметки без генерации ему не отправляются.</p><h2>Подключения и браузер</h2><p>Codex использует собственный вход OpenAI по одноразовому коду. Его токены не передаются браузеру LectureVault. Ключи OpenAI API и Anthropic API хранятся на сервере в зашифрованном виде. Для задания используется ключ выбранного вами провайдера. Подключения можно удалить в настройках. Браузер хранит сессионную cookie, ваши несохранённые черновики и настройки интерфейса; аналитические и рекламные cookies не используются.</p><h2>Удаление</h2><p>Заметки и курсы можно удалить в библиотеке. Удаление аккаунта в настройках удаляет его личные материалы, принадлежащие ему общие курсы и подключения. Резервные копии могут сохраняться в пределах срока, установленного оператором; данные из них не возвращаются в рабочий аккаунт автоматически.</p>{session.supportEmail && <p>Вопросы о данных: <a href={`mailto:${session.supportEmail}`}>{session.supportEmail}</a>.</p>}<Link to="/">Вернуться в LectureVault</Link></main>
 }

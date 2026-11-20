@@ -96,3 +96,44 @@ def test_oversized_pdf_text_is_rejected_instead_of_silently_truncated(monkeypatc
     monkeypatch.setattr(server, 'run', lambda argv, **_kwargs: 'Pages: 1' if argv[0] == 'pdfinfo' else 'A' * 40001)
     with pytest.raises(HTTPException) as error: server.slides(server.SlidesInput(jobId='x', pdf='x'))
     assert error.value.detail['code'] == 'PDF_TEXT_LIMIT'
+
+
+@pytest.mark.parametrize(('http_status', 'status', 'code'), [
+    (200, 'completed', None), (200, 'incomplete', 'OPENAI_INCOMPLETE'),
+    (401, '', 'OPENAI_KEY'), (403, '', 'OPENAI_ACCESS'), (429, '', 'OPENAI_LIMIT'),
+    (503, '', 'OPENAI_UNAVAILABLE'), (302, '', 'OPENAI_UNAVAILABLE'),
+])
+def test_openai_generation_uses_account_key_and_completes_once(monkeypatch, tmp_path, http_status, status, code):
+    monkeypatch.setattr(provider, 'PROFILES', tmp_path)
+    user = '5a21857e-b777-441a-9999-7c9c5a94d222'
+    key = 'sk-proj-test-' + 'x' * 30
+    provider.save_key(provider.ApiKey(userId=user, provider='openai', apiKey=key))
+    assert provider.connected(user, 'openai')
+    assert not provider.connected(user, 'claude')
+    assert not provider.connected('af830736-4bed-43bc-8888-d756a02aa333', 'openai')
+    assert key.encode() not in (tmp_path / user / 'openai-key.enc').read_bytes()
+    calls = []
+    def send(url, **kwargs):
+        calls.append(url)
+        assert url == 'https://api.openai.com/v1/responses'
+        assert kwargs['headers']['Authorization'] == f'Bearer {key}'
+        assert not kwargs['trust_env'] and not kwargs['follow_redirects']
+        data = kwargs['json']
+        assert not data['store'] and not data.get('tools')
+        assert data['reasoning'] == {'effort': 'medium'}
+        assert data['model'] == 'gpt-6.1-terra'
+        assert json.loads(data['input'])['slides'] == 'PDF text'
+        return httpx.Response(http_status, json={'status': status, 'output': [
+            {'type': 'reasoning'}, {'type': 'message', 'role': 'assistant', 'phase': 'commentary', 'content': [{'type': 'output_text', 'text': 'Working…'}]},
+            {'type': 'message', 'role': 'assistant', 'phase': 'final_answer', 'content': [{'type': 'output_text', 'text': '## Note'}]}]})
+    monkeypatch.setattr(httpx, 'post', send)
+    body = provider.GenerateInput(userId=user, provider='openai', model='gpt-6.1-terra', effort='medium', title='Lecture', length='medium', preset='lecture', instructions='', transcript='Speech', slides='PDF text')
+    if code:
+        with pytest.raises(HTTPException) as error:
+            provider.generate(body)
+        assert error.value.detail['code'] == code and key not in str(error.value.detail)
+    else:
+        assert provider.generate(body)['markdown'] == '## Note'
+    assert len(calls) == 1
+    provider.disconnect_provider(provider.Identity(userId=user, provider='openai'))
+    assert not provider.connected(user, 'openai')

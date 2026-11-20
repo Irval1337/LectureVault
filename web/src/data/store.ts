@@ -130,17 +130,23 @@ export const library = {
     return note
   },
   async saveNote(id: string, title: string, markdown: string, revision: number) {
+    const owner = session.user?.id
     const note = await api<Note>(`/notes/${id}`, { method: 'PATCH', body: JSON.stringify({ title, markdown, revision }) })
-    noteCache.set(note.id, { ...note, contentLoaded: true }); await refresh(true)
+    if (session.user?.id !== owner) return note
+    const loaded = { ...note, contentLoaded: true }
+    noteCache.set(note.id, loaded)
+    state = { ...state, notes: state.notes.map(item => item.id === id ? loaded : item) }; emit()
+    await refresh(true)
     return note
   },
   async createJob(input: JobInput, video?: File, pdf?: File) {
+    const owner = session.user?.id
     const body = new FormData(); body.set('metadata', JSON.stringify(input))
     if (video) body.set('video', video)
     if (pdf) body.set('pdf', pdf)
     const result = await api<{ id: string }>('/jobs', { method: 'POST', body })
     await refresh(true)
-    if (!state.expandedCourses.includes(input.courseId)) library.toggleCourse(input.courseId)
+    if (owner === session.user?.id && !state.expandedCourses.includes(input.courseId)) library.toggleCourse(input.courseId)
     return result.id
   },
   async cancel(id: string) { await api(`/jobs/${id}/cancel`, { method: 'POST' }); await refresh(true) },

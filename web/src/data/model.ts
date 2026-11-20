@@ -1,13 +1,15 @@
 import demoMarkdown from '../../../fixtures/demo-note.md?raw'
 
 export type Workspace = 'personal' | 'shared'
+export const PROVIDER_NAMES = { codex: 'Codex', claude: 'Claude', openai: 'OpenAI API' } as const
+export type ProviderId = keyof typeof PROVIDER_NAMES
 export type Course = { id: string; title: string; workspace: Workspace; createdAt: number; ownerId?: string; role?: 'owner' | 'editor' | 'viewer' }
 export type Note = { id: string; courseId: string; title: string; markdown: string; createdAt: number; jobId?: string | null; contentLoaded?: boolean; revision?: number; origin?: 'manual' | 'generated'; isMock?: boolean; updatedAt?: number }
 export type JobStatus = 'queued' | 'acquiring' | 'transcribing' | 'preparing' | 'generating' | 'ready' | 'failed' | 'cancelled'
 export type JobInput = {
   courseId: string; title: string; sourceType: 'file' | 'url'; sourceName: string; sourceSize?: number;
   preset: 'lecture' | 'seminar'; length: 'short' | 'medium' | 'detailed'; instructions: string;
-  pdfName?: string; timestamps: boolean; mode?: 'mock' | 'real'; language?: 'ru' | 'en' | 'auto'; sourceAssetId?: string; pdfAssetId?: string; provider?: 'codex' | 'claude'; model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh'
+  pdfName?: string; timestamps: boolean; mode?: 'mock' | 'real'; language?: 'ru' | 'en' | 'auto'; sourceAssetId?: string; pdfAssetId?: string; provider?: ProviderId; model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh'
 }
 export type Job = JobInput & { id: string; status: JobStatus; createdAt: number; startedAt?: number; completedAt?: number; attempt: number; createdBy?: string; error?: string; noteId?: string }
 export type AppState = { version: 1; courses: Course[]; notes: Note[]; jobs: Job[]; expandedCourses: string[]; readerTheme: 'dark' | 'light' }

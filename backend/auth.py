@@ -45,15 +45,19 @@ def public_user(row):
 
 
 def throttle(settings, key, limit, seconds):
-    digest = hashlib.sha256(key.encode()).hexdigest()
-    window = now() // (seconds * 1000)
     with connect(settings) as db:
         db.execute('BEGIN IMMEDIATE')
-        row = db.execute('SELECT * FROM rate_limits WHERE key=?', (digest,)).fetchone()
-        if row and row['window'] == window and row['count'] >= limit:
-            raise HTTPException(429, 'Слишком много попыток. Попробуйте позже.', headers={'Retry-After': str(seconds)})
-        db.execute('DELETE FROM rate_limits WHERE expires<?', (now(),))
-        db.execute('INSERT INTO rate_limits VALUES (?,?,1,?) ON CONFLICT(key) DO UPDATE SET window=excluded.window,expires=excluded.expires,count=CASE WHEN window=excluded.window THEN count+1 ELSE 1 END', (digest, window, (window + 1) * seconds * 1000))
+        consume_limit(db, key, limit, seconds)
+
+
+def consume_limit(db, key, limit, seconds):
+    digest = hashlib.sha256(key.encode()).hexdigest()
+    window = now() // (seconds * 1000)
+    row = db.execute('SELECT * FROM rate_limits WHERE key=?', (digest,)).fetchone()
+    if row and row['window'] == window and row['count'] >= limit:
+        raise HTTPException(429, 'Слишком много попыток. Попробуйте позже.', headers={'Retry-After': str(seconds)})
+    db.execute('DELETE FROM rate_limits WHERE expires<?', (now(),))
+    db.execute('INSERT INTO rate_limits VALUES (?,?,1,?) ON CONFLICT(key) DO UPDATE SET window=excluded.window,expires=excluded.expires,count=CASE WHEN window=excluded.window THEN count+1 ELSE 1 END', (digest, window, (window + 1) * seconds * 1000))
 
 
 def client_key(request):

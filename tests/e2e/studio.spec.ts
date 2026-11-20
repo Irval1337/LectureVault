@@ -56,3 +56,59 @@ test('explicit legacy import preserves source localStorage and exports exact Mar
   await expect(page.getByRole('heading', { name: 'Библиотека', exact: true })).toBeVisible()
   expect((await page.request.get(`/api/notes/${note.id}`)).status()).toBe(404)
 })
+
+test('editor keeps exact source on rename and changes typed while a save is pending', async ({ page, accounts }) => {
+  await signIn(page, accounts.author)
+  const cid = await createCourse(page.request, 'Черновики ' + Date.now())
+  const markdown = '# Внутренний раздел\n\n* ручное форматирование\n\n'
+  const note = await (await page.request.post('/api/notes', { headers, data: { courseId: cid, title: 'Занятие', markdown } })).json()
+  await page.goto('/notes/' + note.id)
+  await expect(page.locator('.quartz-reader article')).toContainText('Внутренний раздел')
+  await page.getByRole('button', { name: 'Редактировать' }).click()
+  const save = page.getByRole('button', { name: 'Сохранить', exact: true })
+  await expect(save).toBeEnabled()
+  await page.getByLabel('Название заметки').fill('Переименовано')
+  await save.click()
+  await expect.poll(async () => (await (await page.request.get('/api/notes/' + note.id)).json()).title).toBe('Переименовано')
+  expect((await (await page.request.get('/api/notes/' + note.id)).json()).markdown).toBe(markdown)
+  await page.getByRole('tab', { name: 'Markdown', exact: true }).click()
+  const source = page.getByRole('textbox', { name: 'Исходный Markdown' })
+  await source.fill('Версия 1')
+  let allowSave!: () => void
+  const ready = new Promise<void>(resolve => { allowSave = resolve })
+  await page.route('**/api/notes/' + note.id, async route => {
+    if (route.request().method() === 'PATCH') await ready
+    await route.continue()
+  })
+  const requestStarted = page.waitForRequest(r => r.method() === 'PATCH')
+  await save.click()
+  await requestStarted
+  await source.fill('Версия 2, дописана во время сохранения')
+  allowSave()
+  await expect(save).toBeEnabled()
+  await expect(source).toContainText('Версия 2')
+  await save.click()
+  await expect.poll(async () => (await (await page.request.get('/api/notes/' + note.id)).json()).markdown).toBe('Версия 2, дописана во время сохранения')
+  await expect(save).toBeEnabled()
+  await page.unroute('**/api/notes/' + note.id)
+  let release!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/notes/' + note.id, async route => {
+    if (route.request().method() === 'PATCH') await pending
+    await route.continue()
+  })
+  await source.fill('Версия 3')
+  const started = page.waitForRequest(r => r.method() === 'PATCH')
+  await save.click()
+  await started
+  await source.fill('Версия 2, дописана во время сохранения')
+  await page.getByRole('link', { name: 'Чтение' }).click()
+  await page.getByRole('button', { name: 'Редактировать' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Завершаем сохранение' })).toBeVisible()
+  release()
+  await expect.poll(async () => (await (await page.request.get('/api/notes/' + note.id)).json()).markdown).toBe('Версия 3')
+  await expect(page.locator('.milkdown .ProseMirror')).toContainText('Версия 2, дописана во время сохранения')
+  await save.click()
+  await expect.poll(async () => (await (await page.request.get('/api/notes/' + note.id)).json()).markdown).toBe('Версия 2, дописана во время сохранения')
+
+})

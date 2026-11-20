@@ -1,5 +1,6 @@
 """Operator commands. Secrets are read interactively, never from command arguments."""
 import argparse
+from contextlib import closing
 from datetime import datetime, timezone
 from getpass import getpass
 import json
@@ -22,11 +23,19 @@ def backup(settings, output):
         raise SystemExit('Output already exists; refusing to overwrite')
     with tempfile.TemporaryDirectory() as directory:
         snapshot = Path(directory) / 'lecturevault.sqlite3'
-        with sqlite3.connect(settings.data / 'lecturevault.sqlite3') as source, sqlite3.connect(snapshot) as target:
+        with closing(sqlite3.connect(settings.data / 'lecturevault.sqlite3')) as source, closing(sqlite3.connect(snapshot)) as target:
             source.backup(target)
-            assert target.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-            for table in ['sessions', 'auth_tokens', 'mail_outbox']:
-                target.execute(f'DELETE FROM {table}')
+            # The archive contains only the main file. Flush WAL and remove old page contents.
+            target.execute('PRAGMA journal_mode=DELETE')
+            target.execute('PRAGMA secure_delete=ON')
+            with target:
+                for table in ['sessions', 'auth_tokens', 'mail_outbox', 'provider_links', 'rate_limits']:
+                    target.execute(f'DELETE FROM {table}')
+                from .auth import DUMMY_HASH
+                target.execute('UPDATE users SET password_hash=?', (DUMMY_HASH,))
+            target.execute('VACUUM')
+            if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                raise SystemExit('Invalid backup database')
         with output.open('xb') as destination:
             os.chmod(output, 0o600)
             with tarfile.open(fileobj=destination, mode='w:gz') as archive:
@@ -74,6 +83,8 @@ def restore(settings, source):
             db.execute('DELETE FROM sessions')
             db.execute('DELETE FROM auth_tokens')
             db.execute('DELETE FROM mail_outbox')
+            db.execute('DELETE FROM provider_links')
+            db.execute('DELETE FROM rate_limits')
             from .auth import DUMMY_HASH
             db.execute('UPDATE users SET password_hash=?', (DUMMY_HASH,))
             db.execute("UPDATE jobs SET status='failed',error_code='RESTORED',error='Задание восстановлено из резервной копии. Подключите провайдера и повторите.' WHERE status NOT IN ('ready','failed','cancelled')")

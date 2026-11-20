@@ -1,6 +1,6 @@
 # LectureVault — безопасность и эксплуатация
 
-Актуально17ноября2026. Настоящие аккаунты заменили учебный вход. Подготовлены локальный Compose и production overlay; фактическая публикация, DNS и внешняя почта ещё не настроены владельцем.
+Актуально на 20 ноября 2026. Настоящие аккаунты заменили учебный вход. Подготовлены локальный Compose и production overlay; фактическая публикация, DNS и внешняя почта ещё не настроены владельцем.
 
 ## Границы доверия
 
@@ -10,11 +10,13 @@
 - Worker не имеет auth/SMTP secret или CLI homes; передаёт только ограниченный текст своей задачи. API/mailer имеют собственный auth volume; RPC secrets разделены по сервисам. Mailer имеет SMTP egress; media egress не имеет.
 - Все CLI argv статические, model/provider/effort из server allowlist, prompt через stdin как данные. Shell/eval/произвольных флагов нет. Codex tools отключены immutable catalog/flags, Claude — tools/MCP/settings. Prompt injection не даёт прав на shell/чужие файлы/публикацию.
 
+Для OpenAI API broker расшифровывает ключ конкретного пользователя и отправляет текст на фиксированный HTTPS endpoint Responses API. HTTP-клиент отключает перенаправления и прокси из окружения. Генерация выполняется без tools, с отключённым хранением ответа API и лимитом в 16 000 выходных токенов. При таймауте повтор возможен только по отдельному действию пользователя.
+
 ## Аккаунты и права
 
 Argon2id64МБ, ограничение параллельного hashing; пароль15–128символов. Email нормализуется, подтверждение24ч и восстановление30мин единоразовые, digest в DB, письмо в outbox зашифровано; успешная отправка стирает payload. Ссылки во fragment URL, не query; API access logs отключены, чувствительный ввод не включается в validation errors. Persistent rate limits по IP/email/action.
 
-Opaque session cookie: HttpOnly/SameSite=Strict, в production Secure и __Host prefix без Domain;8ч максимум/2ч бездействия. Пароль/reset/logout-all отзывают сессии. Чувствительные подключения требуют пароль после15мин. Exact Origin/TrustedHost + custom CSRF header; только trusted ingress перезаписывает client IP. API порт наружу не опубликован. TLS/CSP/nosniff/no-referrer защищают браузерную границу. Клиент не получает CLI access/refresh tokens; свой Anthropic API key вводится по HTTPS, хранится encrypted на сервере и не возвращается API/localStorage.
+Opaque session cookie: HttpOnly/SameSite=Strict, в production Secure и __Host prefix без Domain;8ч максимум/2ч бездействия. Пароль/reset/logout-all отзывают сессии. Чувствительные подключения требуют пароль после15мин. Exact Origin/TrustedHost + custom CSRF header; только trusted ingress перезаписывает client IP. API порт наружу не опубликован. TLS/CSP/nosniff/no-referrer защищают браузерную границу. Клиент не получает CLI access/refresh tokens; личный ключ Anthropic или OpenAI вводится по HTTPS, хранится зашифрованным на сервере и не возвращается API/localStorage.
 
 Каждый курс/Note/job/asset/export проверяет caller и membership. Owner управляет курсом/ролями; editor пишет документы, viewer только читает/экспортирует. Общий курс не означает публичность и не добавляет людей автоматически. Управление job принадлежит отправителю. Revision409 не перезаписывает черновик. API сериализует изменение подключения и удаление аккаунта; прерванное удаление можно повторить после перезапуска. Публичных/unlisted страниц нет.
 
@@ -60,7 +62,7 @@ Production overlay убирает web loopback publish, не запускает 
 
 ## Резервные копии и восстановление
 
-CLI `python -m backend.manage backup --output PATH` и `restore --input PATH` запускается от UID10001. Backup включает SQLite snapshot, assets и jobs; sessions, одноразовые ссылки и outbox очищаются только **в копии**. CLI profiles/SMTP/encryption keys не включаются. Архив содержит приватные документы и password hashes: хранить0600 на шифрованном диске, вне Git и публичного webroot.
+CLI `python -m backend.manage backup --output PATH` и `restore --input PATH` запускается от UID10001. Backup включает SQLite snapshot, assets и jobs; sessions, одноразовые ссылки и outbox удаляются из самого архивного файла SQLite. В копии также удаляются счётчики запросов и признаки подключений, пароль заменяется неиспользуемым хешем. Архивы прежних версий могут содержать старые записи сессий, хеши паролей и зашифрованный outbox. Храните их как приватные данные. CLI profiles/SMTP/encryption keys не включаются. Храните архив с правами 0600 на зашифрованном диске вне Git и публичного webroot.
 
 Остановить API/worker/mailer, чтобы файлы и DB не менялись. Пример для локального Compose (production — добавить env-file и оба compose-файла ко всем командам):
 
@@ -90,4 +92,4 @@ API-тесты проверяют реальные регистрации/пар
 
 Нет обещания абсолютной безопасности или промышленного масштаба: один API-процесс, один worker, SQLite и доверенный CLI broker рассчитаны на небольшой экземпляр. Backups и наблюдение за mail/disk остаются обязанностью оператора; горизонтальное масштабирование и независимый внешний pentest не проводились. Настройки личных инструментов/host CLI не менялись, публикация и push автоматически не выполняются.
 
-Проверка npm17ноября: `npm audit --omit=dev` —0; полный audit —7 high-записей одной транзитивной проблемы picomatch<=4.0.7 в Vite/Vitest/Sass build tooling. Патч ещё не опубликован ([GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)); пользовательские glob patterns не передаются этим инструментам, dev-сервер bind127.0.0.1, в runtime Nginx нет Node/build dependencies. Не применять предложенный audit force-downgrade и не объявлять полный audit чистым; обновить lock после upstream patch.
+Проверка зависимостей 20 ноября 2026: `npm audit`, `npm audit --omit=dev` и `pip-audit` по зафиксированным backend-зависимостям не нашли известных уязвимостей. Ранее упомянутое предупреждение по picomatch было отозвано 18 ноября. [История advisory](https://github.com/advisories/GHSA-fc5q-39xc-vjpf).

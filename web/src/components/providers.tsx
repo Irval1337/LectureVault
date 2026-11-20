@@ -2,13 +2,18 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, NavLink } from 'react-router-dom'
 import { Settings2 } from 'lucide-react'
 import { api, ApiError } from '../data/api'
+import { PROVIDER_NAMES, type ProviderId } from '../data/model'
 import { Button } from './ui/button'
 import { Dialog } from './ui/dialog'
 import { useSession } from '../data/store'
 
-export type Provider = { id: 'codex' | 'claude'; name: string; authType?: 'deviceCode' | 'apiKey'; connected: boolean; models: { id: string; name: string; efforts: string[] }[]; login: { status: string; url?: string; userCode?: string } }
-export type GenerationOptions = { provider: 'codex' | 'claude'; model: string; effort: 'low' | 'medium' | 'high' | 'xhigh' }
+export type Provider = { id: ProviderId; name: string; connected: boolean; models: { id: string; name: string; efforts: string[] }[]; login: { status: string; url?: string; userCode?: string } }
+export type GenerationOptions = { provider: ProviderId; model: string; effort: 'low' | 'medium' | 'high' | 'xhigh' }
 export const defaultGeneration: GenerationOptions = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'medium' }
+const keyConnections = {
+  claude: { service: 'Anthropic API', subscription: 'Claude', example: 'sk-ant-…' },
+  openai: { service: 'OpenAI API', subscription: 'ChatGPT', example: 'sk-…' },
+}
 
 export function ProviderConnections({ small = false, account = false }: { small?: boolean; connectProvider?: Provider['id']; account?: boolean }) {
   const session = useSession()
@@ -37,6 +42,7 @@ export function ConnectionSettings() {
     return () => window.clearInterval(timer)
   }, [])
   const codex = providers.find(provider => provider.id === 'codex')
+  const keyConnection = activeDialog && activeDialog !== 'codex' ? keyConnections[activeDialog] : undefined
   useEffect(() => {
     if (activeDialog === 'codex' && codex?.connected) {
       setActiveDialog(null); setNotice('Codex подключён.')
@@ -46,12 +52,12 @@ export function ConnectionSettings() {
   const closeDialog = () => {
     setActiveDialog(null); setApiKey(''); setCopied(false); setError('')
   }
-  const action = async (provider: string, command: string, key?: string) => {
+  const action = async (provider: ProviderId, command: 'key' | 'connect' | 'disconnect', key?: string) => {
     setBusy(provider); setError(''); setNotice('')
     try {
       await api(`/providers/${provider}/${command}`, { method: 'POST', body: JSON.stringify(command === 'key' ? { apiKey: key } : {}) })
-      if (command === 'key') { setApiKey(''); setActiveDialog(null); setNotice('Ключ Claude сохранён.') }
-      if (command === 'disconnect') { setActiveDialog(null); setNotice(provider === 'codex' ? 'Подключение Codex отключено.' : 'Ключ Claude удалён.') }
+      if (command === 'key') { setApiKey(''); setActiveDialog(null); setNotice(`Ключ ${PROVIDER_NAMES[provider]} сохранён.`) }
+      if (command === 'disconnect') { setActiveDialog(null); setNotice(provider === 'codex' ? 'Подключение Codex отключено.' : `Ключ ${PROVIDER_NAMES[provider]} удалён.`) }
       setCopied(false); await load()
     } catch (error) {
       if (error instanceof ApiError && error.status === 428) { pending.current = () => action(provider, command, key); setReauth(true) }
@@ -75,15 +81,15 @@ export function ConnectionSettings() {
     <h2 className="sr-only">Подключения</h2>
     <p className="settings-intro">Подключите свой аккаунт для генерации из видео. Писать заметки можно без AI.</p>
     <div className="provider-connections">
-      {!providers.length && <p role="status" className="field-hint">Проверяем подключения…</p>}
+      {!providers.length && !error && <p role="status" className="field-hint">Проверяем подключения…</p>}
       {providers.map(provider => <div key={provider.id} className="provider-row">
         <div className="provider-heading">
           <strong>{provider.name}</strong>
           <span role="status" className={provider.connected ? 'provider-connected' : ''}>
-            {provider.connected ? provider.id === 'claude' ? 'Ключ сохранён' : 'Подключён' : provider.id === 'codex' && waiting ? 'Ожидаем входа' : provider.login.status === 'unavailable' ? 'Недоступен' : 'Не подключён'}
+            {provider.connected ? provider.id === 'codex' ? 'Подключён' : 'Ключ сохранён' : provider.id === 'codex' && waiting ? 'Ожидаем входа' : provider.login.status === 'unavailable' ? 'Недоступен' : 'Не подключён'}
           </span>
         </div>
-        <p className="provider-description">{provider.id === 'codex' ? 'Аккаунт ChatGPT' : 'Anthropic API · отдельная оплата'}</p>
+        <p className="provider-description">{provider.id === 'codex' ? 'Аккаунт ChatGPT' : provider.id === 'claude' ? 'Ключ Anthropic · оплата по API' : 'Ключ OpenAI · оплата по API'}</p>
         {provider.connected
           ? <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { if (window.confirm(`Отключить ${provider.name}? Ваши заметки сохранятся.`)) void action(provider.id, 'disconnect') }}>Отключить</Button>
           : <Button size="sm" variant="outline" disabled={!!busy || provider.login.status === 'unavailable'} onClick={() => openConnection(provider)} aria-label={`Подключить ${provider.name}`}>
@@ -93,7 +99,7 @@ export function ConnectionSettings() {
       {error && !activeDialog && !reauth && <p role="alert" className="field-error">{error}</p>}
       {notice && <p role="status" className="auth-notice">{notice}</p>}
     </div>
-    <Dialog open={!!activeDialog} onOpenChange={open => { if (!open) closeDialog() }} title={activeDialog === 'claude' ? 'Подключить Claude' : 'Подключить Codex'} description={activeDialog === 'claude' ? 'Используйте собственный ключ Anthropic API.' : 'Подтвердите вход в ваш аккаунт на странице OpenAI.'} className="connection-dialog">
+    <Dialog open={!!activeDialog} onOpenChange={open => { if (!open) closeDialog() }} title={`Подключить ${activeDialog ? PROVIDER_NAMES[activeDialog] : ''}`} description={keyConnection ? `Используйте собственный ключ ${keyConnection.service}.` : 'Подтвердите вход в ваш аккаунт на странице OpenAI.'} className="connection-dialog">
       {activeDialog === 'codex' && <>
         {codex?.login.url && waiting ? <div className="provider-login">
           <div className="device-code-row"><code className="device-code" aria-label="Одноразовый код">{codex.login.userCode || 'Получаем код…'}</code><Button size="sm" variant="ghost" disabled={!codex.login.userCode} onClick={() => { void navigator.clipboard.writeText(codex.login.userCode!).then(() => setCopied(true)).catch(() => setError('Выделите код и скопируйте его вручную.')) }}>{copied ? 'Скопировано' : 'Скопировать'}</Button></div>
@@ -104,10 +110,10 @@ export function ConnectionSettings() {
         <details className="connection-help"><summary>Не получается войти?</summary><p>OpenAI может попросить разрешить вход по коду в настройках безопасности ChatGPT.</p><a href="https://learn.chatgpt.com/docs/auth" target="_blank" rel="noopener noreferrer">Инструкция OpenAI</a></details>
         <div className="dialog-actions"><Button variant="ghost" disabled={!!busy} onClick={() => void action('codex', 'disconnect')}>Отменить вход</Button></div>
       </>}
-      {activeDialog === 'claude' && <form className="provider-key-form" onSubmit={event => { event.preventDefault(); void action('claude', 'key', apiKey) }}>
-        <label className="field-label" htmlFor="anthropic-key">Ключ Anthropic API</label>
-        <input id="anthropic-key" type="password" value={apiKey} autoComplete="off" spellCheck={false} maxLength={512} placeholder="sk-ant-…" onChange={event => setApiKey(event.target.value)} required />
-        <p className="field-hint">API оплачивается отдельно от подписки Claude. Сохранённый ключ не отображается в браузере.</p>
+      {activeDialog && keyConnection && <form className="provider-key-form" onSubmit={event => { event.preventDefault(); void action(activeDialog, 'key', apiKey.trim()) }}>
+        <label className="field-label" htmlFor="provider-api-key">Ключ {keyConnection.service}</label>
+        <input id="provider-api-key" type="password" value={apiKey} autoComplete="off" spellCheck={false} maxLength={512} placeholder={keyConnection.example} onChange={event => setApiKey(event.target.value)} required />
+        <p className="field-hint">Расходы по API учитываются отдельно от подписки {keyConnection.subscription}. После сохранения ключ можно удалить в настройках.</p>
         <div className="dialog-actions"><Button type="button" variant="ghost" onClick={closeDialog}>Отмена</Button><Button size="sm" disabled={!apiKey.trim() || !!busy} type="submit">Сохранить ключ</Button></div>
       </form>}
       {error && !reauth && <p role="alert" className="field-error">{error}</p>}
@@ -131,8 +137,8 @@ export function ProviderOptions({ value, onChange, onAvailabilityChange }: { val
       <select id="generation-provider" value={value.provider} onChange={event => {
         const next = providers.find(item => item.id === event.target.value)
         if (next) onChange({ provider: next.id, model: next.models[0].id, effort: 'medium' })
-      }}>{providers.length ? providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>) : <option value={value.provider}>{value.provider === 'codex' ? 'Codex' : 'Claude'}</option>}</select>
-      {provider && !provider.connected && <p className="field-hint">{provider.name} не подключён. <Link to="/settings#connections">Подключить в настройках</Link></p>}
+      }}>{providers.length ? providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>) : <option value={value.provider}>{PROVIDER_NAMES[value.provider]}</option>}</select>
+      {provider && !provider.connected && <p className="field-hint">{provider.name} не подключён. <Link to="/settings#connections" state={{ fromGeneration: true }}>Подключить в настройках</Link></p>}
     </div>
     <div className="provider-model-effort">
       <div><label className="field-label" htmlFor="generation-model">Модель</label><select id="generation-model" value={value.model} onChange={event => {

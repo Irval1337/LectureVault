@@ -20,8 +20,28 @@ class JobError(Exception):
         super().__init__(message)
 
 
+class JobStopped(Exception):
+    pass
+
+
+def check_active(db, job_id):
+    row = db.execute("""SELECT j.status,j.error_code,
+        (owner.disabled=0 AND sender.disabled=0 AND
+         (j.created_by=c.owner_id OR (c.workspace='shared' AND m.role='editor'))) AS writable
+        FROM jobs j JOIN courses c ON c.id=j.course_id
+        LEFT JOIN users owner ON owner.id=c.owner_id LEFT JOIN users sender ON sender.id=j.created_by
+        LEFT JOIN members m ON m.course_id=c.id AND m.user_id=j.created_by
+        WHERE j.id=?""", (job_id,)).fetchone()
+    if not row or row['status'] in ('ready', 'failed', 'cancelled'):
+        raise JobStopped()
+    if row['error_code'] == 'ACCESS_REVOKED' or not row['writable']:
+        raise JobError('ACCESS_REVOKED', 'Права на запись в курс отозваны.')
+
+
 def set_stage(settings, job_id, status):
     with connect(settings) as db:
+        db.execute('BEGIN IMMEDIATE')
+        check_active(db, job_id)
         db.execute('UPDATE jobs SET status=? WHERE id=?', (status, job_id))
     log.info('job=%s stage=%s', job_id, status)
 
@@ -74,6 +94,8 @@ def run_job(settings, row):
         if not isinstance(markdown, str) or not markdown.strip() or len(markdown) > 200000:
             raise JobError('INVALID_MARKDOWN', 'Обработчик вернул пустой или слишком большой документ.')
         with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
+            check_active(db, job_id)
             note_id = uid()
             existing = db.execute('SELECT id FROM notes WHERE job_id=?', (job_id,)).fetchone()
             if existing:
@@ -88,6 +110,8 @@ def run_job(settings, row):
                 db.execute('INSERT INTO notes VALUES (?,?,?,?,?,?,?,?,?,?)', (note_id, job['courseId'], job['title'], markdown, 'generated', 1, now(), now(), job_id, int(job['mode'] == 'mock')))
             db.execute("UPDATE jobs SET status='ready',completed_at=?,note_id=?,error=NULL,error_code=NULL WHERE id=?", (now(), note_id, job_id))
         log.info('job=%s stage=ready', job_id)
+    except JobStopped:
+        return
     except Exception as error:
         code = error.code if isinstance(error, JobError) else 'PROCESSING_ERROR'
         message = error.message if isinstance(error, JobError) else 'Обработка завершилась ошибкой. Исходник сохранён; задание можно повторить.'
@@ -99,7 +123,10 @@ def run_job(settings, row):
 def claim(settings):
     with connect(settings) as db:
         db.execute('BEGIN IMMEDIATE')
-        row = db.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at,rowid LIMIT 1").fetchone()
+        row = db.execute("""SELECT j.* FROM jobs j JOIN courses c ON c.id=j.course_id
+            JOIN users owner ON owner.id=c.owner_id AND owner.disabled=0
+            JOIN users sender ON sender.id=j.created_by AND sender.disabled=0
+            WHERE j.status='queued' ORDER BY j.created_at,j.rowid LIMIT 1""").fetchone()
         if row:
             db.execute("UPDATE jobs SET status='acquiring',started_at=? WHERE id=? AND status='queued'", (now(), row['id']))
         return row

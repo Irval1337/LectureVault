@@ -67,7 +67,7 @@ export function SettingsPage() {
 
   return <div className="settings-page">
     <PageHeading title="Настройки" />
-    <TabBar label="Разделы настроек" panelId="settings-panel" value={section} items={sections} className="settings-tabs" onValueChange={value => { navigate('/settings#' + value, { replace: true }); window.scrollTo(0, 0) }} />
+    <TabBar label="Разделы настроек" panelId="settings-panel" value={section} items={sections} className="settings-tabs" onValueChange={value => { navigate('/settings#' + value, { replace: true, state: location.state }); window.scrollTo(0, 0) }} />
     <div className="settings-panel" id="settings-panel" role="tabpanel" aria-labelledby={`settings-panel-${section}-tab`}>
       {section === 'profile' && <section className="settings-section">
         <h2>Личные данные</h2>
@@ -109,6 +109,7 @@ export function SettingsPage() {
         </details>
       </>}
     </div>
+    {location.state?.fromGeneration && <Link className="back-link" to="/new">Вернуться к конспекту</Link>}
     <Link className="privacy-link" to="/privacy">Конфиденциальность</Link>
   </div>
 }

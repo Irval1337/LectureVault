@@ -82,18 +82,20 @@ def transcribe(body: MediaInput):
     if not 0 < duration <= 7200:
         fail('DURATION_LIMIT', 'Допустимо видео с длительностью до двух часов.')
     audio = directory / 'audio.wav'
+    result = directory / 'transcript'
+    output = result.with_suffix('.txt')
+    output.unlink(missing_ok=True)
     try:
         run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-protocol_whitelist', 'file,pipe', '-i', str(video), '-vn', '-ac', '1', '-ar', '16000', '-t', '7200', str(audio)], cwd=directory, timeout=300)
         language = body.language if body.language in ['ru', 'en', 'auto'] else 'ru'
-        result = directory / 'transcript'
         run(['/opt/whisper/bin/whisper-cli', '-m', os.environ.get('WHISPER_MODEL', '/opt/models/ggml-tiny.bin'), '-f', str(audio), '-l', language, '-t', '4', '-ng', '-otxt', '-of', str(result)], cwd=directory, timeout=3600)
-        output = result.with_suffix('.txt')
         if output.is_symlink() or not output.resolve().is_relative_to(directory.resolve()):
             fail('UNSAFE_OUTPUT', 'Обработчик создал недопустимый выходной файл.')
         with output.open(encoding='utf-8') as transcript:
             text = transcript.read(140001)
     finally:
         audio.unlink(missing_ok=True)
+        output.unlink(missing_ok=True)
     if len(text) > 140000:
         fail('TRANSCRIPT_LIMIT', 'Расшифровка превышает 140 000 символов. Разделите видео на более короткие записи.')
     return {'text': text, 'duration': duration}

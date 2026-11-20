@@ -291,3 +291,98 @@ def test_provider_identity_is_server_owned_and_reauth_required(env, monkeypatch)
     assert c.post('/api/providers/codex/connect', json={}).status_code == 428
     assert c.post('/api/auth/reauth', json={'password': PASSWORD}).status_code == 200
     assert c.post('/api/providers/codex/connect', json={}).status_code == 200
+
+
+@pytest.mark.parametrize('when', ['queued', 'transcribing', 'generating'])
+def test_revoked_editor_job_stops_before_next_stage(env, monkeypatch, when):
+    from backend import worker
+    c, settings, _, reader = env
+    cid = course(c, 'shared')
+    share(c, cid, 'editor')
+    login(c, 'reader')
+    calls = []
+    def revoke():
+        c.put(f"/api/courses/{cid}/members/{reader['id']}", json={'role': 'viewer'}).raise_for_status()
+    def rpc(_settings, _service, endpoint, _body, **kwargs):
+        calls.append(endpoint)
+        if endpoint == '/providers/status':
+            return {'providers': [{'id': 'openai', 'connected': True}]}
+        if endpoint == '/transcribe':
+            if when == 'transcribing':
+                revoke()
+            return {'text': 'synthetic transcript'}
+        assert endpoint == '/generate' and _body['provider'] == 'openai' and _body['userId'] == reader['id']
+        if when == 'generating':
+            revoke()
+        return {'markdown': '## Result'}
+    monkeypatch.setattr(worker, 'rpc', rpc)
+    metadata = {'courseId': cid, 'title': 'Test', 'provider': 'openai', 'model': 'gpt-6.1-terra'}
+    response = c.post('/api/jobs', data={'metadata': json.dumps(metadata)}, files={'video': ('demo.mp4', b'0000ftypmp42', 'video/mp4')})
+    response.raise_for_status()
+    login(c)
+    if when == 'queued':
+        revoke()
+    row = claim(settings)
+    if row:
+        worker.run_job(settings, row)
+    data = c.get('/api/jobs/' + response.json()['id']).json()
+    assert data['status'] in ('failed', 'cancelled') and not data['noteId']
+    assert ('/transcribe' in calls) == (when != 'queued')
+    assert ('/generate' in calls) == (when == 'generating')
+
+
+def test_openai_job_produces_a_single_editable_exportable_note(env, monkeypatch):
+    import httpx
+    from backend import worker
+    from runner import provider
+    c, settings, author, _ = env
+    cid = course(c)
+    profiles = settings.data.parent / 'test-profiles'
+    profiles.mkdir()
+    monkeypatch.setattr(provider, 'PROFILES', profiles)
+    markdown = '## Определение\n\nДанные из речи и слайдов.'
+    calls = []
+    def completion(url, **kwargs):
+        assert url == 'https://api.openai.com/v1/responses'
+        prompt = json.loads(kwargs['json']['input'])
+        assert (prompt['transcript'], prompt['slides']) == ('Речь из видеофайла.', 'Текст слайда.')
+        calls.append(url)
+        return httpx.Response(200, json={'status': 'completed', 'output': [{'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': markdown}]}]})
+    def rpc(_settings, service, endpoint, body, **kwargs):
+        if endpoint in ('/transcribe', '/slides'):
+            assert service == settings.media_url
+            return {'text': 'Речь из видеофайла.' if endpoint == '/transcribe' else 'Текст слайда.'}
+        assert service == settings.providers_url and body['userId'] == author['id']
+        if endpoint == '/providers/key':
+            return provider.save_key(provider.ApiKey(**body))
+        if endpoint == '/providers/status':
+            return {'providers': [{'id': 'openai', 'connected': provider.connected(body['userId'], 'openai')}]}
+        assert endpoint == '/generate'
+        return provider.generate(provider.GenerateInput(**body))
+    monkeypatch.setattr(worker, 'rpc', rpc)
+    monkeypatch.setattr(httpx, 'post', completion)
+    c.post('/api/providers/openai/key', json={'apiKey': 'sk-proj-synthetic-' + 'x' * 32}).raise_for_status()
+    response = c.post('/api/jobs', data={'metadata': json.dumps({'courseId': cid, 'title': 'Лекция', 'provider': 'openai', 'model': 'gpt-6.1-terra'})}, files={'video': ('source.mp4', b'0000ftypmp42'), 'pdf': ('slides.pdf', b'%PDF-1.4')})
+    response.raise_for_status()
+    row = claim(settings)
+    run_job(settings, row)
+    run_job(settings, row)
+    assert len(calls) == 1
+    job = c.get('/api/jobs/' + response.json()['id']).json()
+    assert job['status'] == 'ready'
+    path = '/api/notes/' + job['noteId']
+    note = c.get(path).json()
+    assert note['origin'] == 'generated' and not note['isMock']
+    assert note['markdown'] == markdown == c.get(path + '/export').text
+    c.patch(path, json={'revision': note['revision'], 'title': 'Моя версия', 'markdown': markdown + ' Правка.'}).raise_for_status()
+
+
+def test_invalid_job_does_not_consume_daily_job_quota(env):
+    import hashlib
+    c, settings, author, _ = env
+    cid = course(c)
+    assert job(c, cid, source='invalid').status_code == 422
+    assert job(c, cid).status_code == 201
+    digest = hashlib.sha256(('jobs-day:' + author['id']).encode()).hexdigest()
+    with connect(settings) as db:
+        assert db.execute('SELECT count FROM rate_limits WHERE key=?', (digest,)).fetchone()[0] == 1

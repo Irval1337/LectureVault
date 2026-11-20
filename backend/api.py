@@ -20,8 +20,8 @@ from fastapi.exceptions import RequestValidationError
 
 from .config import Settings
 from .db import connect, course_json, initialize, job_json, note_json, now, uid
-from .providers import CATALOG, valid_options
-from .auth import install_auth, public_user, email_address, throttle, PasswordInput, password_matches
+from .providers import CATALOG, PROVIDERS, ProviderId, valid_api_key, valid_options
+from .auth import install_auth, public_user, email_address, throttle, consume_limit, PasswordInput, password_matches
 
 
 class CourseInput(BaseModel):
@@ -51,7 +51,7 @@ class JobInput(BaseModel):
     instructions: str = Field(default='', max_length=4000)
     mode: Literal['mock', 'real'] = 'real'
     language: Literal['ru', 'en', 'auto'] = 'ru'
-    provider: Literal['codex', 'claude'] = 'codex'
+    provider: ProviderId = 'codex'
     model: str = Field(default='gpt-6.1-sol', max_length=50)
     effort: Literal['low', 'medium', 'high', 'xhigh'] = 'medium'
 
@@ -187,21 +187,21 @@ def create_app(settings: Settings | None = None):
 
     @app.post('/api/providers/{provider}/{action}')
     @account_action
-    def provider_action(provider: Literal['codex', 'claude'], action: Literal['connect', 'key', 'disconnect'], body: dict, user_id=Depends(recent_user)):
+    def provider_action(provider: ProviderId, action: Literal['connect', 'key', 'disconnect'], body: dict, user_id=Depends(recent_user)):
         from .worker import JobError, rpc
         payload = {'userId': user_id, 'provider': provider}
         throttle(settings, 'provider-action:' + user_id, 20, 900)
         if action == 'key':
             key = body.get('apiKey')
-            if provider != 'claude' or not isinstance(key, str) or not 20 <= len(key) <= 512:
-                raise HTTPException(422, 'Введите ключ Anthropic API.')
+            if not valid_api_key(provider, key):
+                raise HTTPException(422, 'Введите API-ключ выбранного провайдера.')
             payload['apiKey'] = key
+        # A broker call may succeed even when its reply is lost.
+        if action in ['connect', 'key']:
+            with connect(settings) as db:
+                db.execute('INSERT OR IGNORE INTO provider_links VALUES (?)', (user_id,))
         try:
-            result = rpc(settings, settings.provider_url(user_id), f'/providers/{action}', payload, timeout=30)
-            if action in ['connect', 'key']:
-                with connect(settings) as db:
-                    db.execute('INSERT OR IGNORE INTO provider_links VALUES (?)', (user_id,))
-            return result
+            return rpc(settings, settings.provider_url(user_id), f'/providers/{action}', payload, timeout=30)
         except JobError as error:
             raise HTTPException(502, error.message) from None
 
@@ -261,6 +261,13 @@ def create_app(settings: Settings | None = None):
             if not db.execute('SELECT 1 FROM members WHERE course_id=? AND user_id=?', (course_id, member_id)).fetchone():
                 raise HTTPException(404, 'Участник не найден.')
             db.execute('DELETE FROM members WHERE course_id=? AND user_id=?', (course_id, member_id))
+            if body['role'] != 'editor':
+                db.execute("""UPDATE jobs SET
+                    completed_at=CASE WHEN status='queued' THEN ? ELSE completed_at END,
+                    status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,
+                    error_code='ACCESS_REVOKED',error='Права на запись в курс отозваны.'
+                    WHERE course_id=? AND created_by=? AND status NOT IN ('failed','ready','cancelled')""",
+                    (now(), course_id, member_id))
             if body['role'] != 'none':
                 db.execute('INSERT INTO members VALUES (?,?,?)', (course_id, member_id, body['role']))
         return {'ok': True}
@@ -396,7 +403,6 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(422, 'Проверьте параметры задания.')
         if not body.title.strip():
             raise HTTPException(422, 'Введите название конспекта.')
-        throttle(settings, 'jobs-day:' + user_id, 30, 86400)
         with connect(settings) as db:
             access(db, body.courseId, user_id, write=True)
             count = db.execute("SELECT count(*) FROM jobs WHERE status NOT IN ('ready','failed','cancelled') AND created_by=?", (user_id,)).fetchone()[0]
@@ -418,7 +424,7 @@ def create_app(settings: Settings | None = None):
             except JobError:
                 raise HTTPException(503, {'field': 'provider', 'message': 'Сервис подключения недоступен. Повторите попытку после запуска приложения.'}) from None
             if not any(p['id'] == body.provider and p['connected'] for p in status.get('providers', [])):
-                raise HTTPException(422, {'field': 'provider', 'message': f'Войдите в {"Codex" if body.provider == "codex" else "Claude"} перед отправкой видео.'})
+                raise HTTPException(422, {'field': 'provider', 'message': f'Подключите {PROVIDERS[body.provider]["name"]} перед отправкой видео.'})
         job_id = uid()
         directory = settings.jobs / job_id
         assets = []
@@ -439,6 +445,7 @@ def create_app(settings: Settings | None = None):
                 if db.execute("SELECT count(*) FROM jobs WHERE status NOT IN ('ready','failed','cancelled') AND created_by=?", (user_id,)).fetchone()[0] >= 10:
                     raise HTTPException(429, 'Не более 10 активных заданий на пользователя.')
                 check_quota(db, user_id, sum(item[4] for item in assets), body.courseId)
+                consume_limit(db, 'jobs-day:' + user_id, 30, 86400)
                 db.execute('INSERT INTO jobs(id,course_id,created_by,payload,status,created_at) VALUES (?,?,?,?,?,?)', (job_id, body.courseId, user_id, json.dumps(payload, ensure_ascii=False), 'queued', now()))
                 for item in assets:
                     db.execute('INSERT INTO assets VALUES (?,?,?,?,?,?,?,?)', (item[0], body.courseId, None, job_id, *item[1:]))
@@ -482,6 +489,7 @@ def create_app(settings: Settings | None = None):
         if not isinstance(courses, list) or not isinstance(notes, list) or len(courses) > 100 or len(notes) > 500:
             raise HTTPException(422, 'Неверный формат локальной библиотеки.')
         with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
             if db.execute('SELECT 1 FROM imports WHERE user_id=? AND digest=?', (user_id, digest)).fetchone():
                 return {'imported': 0}
             if db.execute('SELECT count(*) FROM courses WHERE owner_id=?', (user_id,)).fetchone()[0] + len(courses) > 100:
@@ -583,7 +591,6 @@ def create_app(settings: Settings | None = None):
             result = db.execute('UPDATE users SET disabled=2 WHERE id=? AND password_hash=?', (user_id, account['password_hash']))
             if result.rowcount != 1:
                 raise HTTPException(409, 'Аккаунт изменён. Повторите вход.')
-            db.execute("UPDATE jobs SET status='cancelled',completed_at=? WHERE status='queued' AND (created_by=? OR course_id IN (SELECT id FROM courses WHERE owner_id=?))", (now(), user_id, user_id))
             has_profile = bool(db.execute('SELECT 1 FROM provider_links WHERE user_id=?', (user_id,)).fetchone())
         if has_profile:
             try:
@@ -595,6 +602,7 @@ def create_app(settings: Settings | None = None):
         paths, jobs = [], []
         with connect(settings) as db:
             db.execute('BEGIN IMMEDIATE')
+            db.execute("UPDATE jobs SET status='cancelled',completed_at=? WHERE status='queued' AND (created_by=? OR course_id IN (SELECT id FROM courses WHERE owner_id=?))", (now(), user_id, user_id))
             for course in db.execute('SELECT id FROM courses WHERE owner_id=?', (user_id,)).fetchall():
                 file_paths, job_ids = delete_course_rows(db, course['id'])
                 paths.extend(file_paths); jobs.extend(job_ids)
