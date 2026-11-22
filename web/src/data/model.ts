@@ -1,17 +1,17 @@
 import demoMarkdown from '../../../fixtures/demo-note.md?raw'
 
 export type Workspace = 'personal' | 'shared'
-export const PROVIDER_NAMES = { codex: 'Codex', claude: 'Claude', openai: 'OpenAI API' } as const
+export const PROVIDER_NAMES = { codex: 'Codex', claude: 'Claude Code', openai: 'Свой API' } as const
 export type ProviderId = keyof typeof PROVIDER_NAMES
-export type Course = { id: string; title: string; workspace: Workspace; createdAt: number; ownerId?: string; role?: 'owner' | 'editor' | 'viewer' }
-export type Note = { id: string; courseId: string; title: string; markdown: string; createdAt: number; jobId?: string | null; contentLoaded?: boolean; revision?: number; origin?: 'manual' | 'generated'; isMock?: boolean; updatedAt?: number }
+export type Course = { folders?: string[]; folderIcons?: Record<string,string>; icon?: string; id: string; title: string; workspace: Workspace; createdAt: number; ownerId?: string; role?: 'owner' | 'editor' | 'viewer' }
+export type Note = { category?: string; id: string; courseId: string; title: string; markdown: string; createdAt: number; jobId?: string | null; contentLoaded?: boolean; revision?: number; origin?: 'manual' | 'generated'; isMock?: boolean; updatedAt?: number }
 export type JobStatus = 'queued' | 'acquiring' | 'transcribing' | 'preparing' | 'generating' | 'ready' | 'failed' | 'cancelled'
-export type JobInput = {
+export type JobInput = { category?: string;
   courseId: string; title: string; sourceType: 'file' | 'url'; sourceName: string; sourceSize?: number;
   preset: 'lecture' | 'seminar'; length: 'short' | 'medium' | 'detailed'; instructions: string;
-  pdfName?: string; timestamps: boolean; mode?: 'mock' | 'real'; language?: 'ru' | 'en' | 'auto'; sourceAssetId?: string; pdfAssetId?: string; provider?: ProviderId; model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh'
+  targetWords?: number; slideLimit?: number | null; apiBase?: string; pdfName?: string; timestamps: boolean; mode?: 'mock' | 'real'; language?: 'ru' | 'en' | 'auto'; sourceAssetId?: string; pdfAssetId?: string; provider?: ProviderId; model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh'
 }
-export type Job = JobInput & { id: string; status: JobStatus; createdAt: number; startedAt?: number; completedAt?: number; attempt: number; createdBy?: string; error?: string; noteId?: string }
+export type Job = JobInput & { effortApplied?: boolean; transcriptReused?: boolean; slidesReused?: boolean; slideTextCondensed?: number; recognitionPercent?: number; stageStartedAt?: number; failedStage?: JobStatus; id: string; status: JobStatus; createdAt: number; startedAt?: number; completedAt?: number; attempt: number; createdBy?: string; error?: string; noteId?: string }
 export type AppState = { version: 1; courses: Course[]; notes: Note[]; jobs: Job[]; expandedCourses: string[]; readerTheme: 'dark' | 'light' }
 
 export const STORAGE_KEY = 'lecturevault.library.v1'
@@ -71,7 +71,7 @@ export function advanceQueue(previous: AppState, now: number): AppState {
     const course = state.courses.find(c => c.id === active!.courseId)
     const demoFailure = active.sourceType === 'url' && new URL(active.sourceName).hostname === 'error.example' && active.attempt === 0
     if (!course || demoFailure) {
-      state = { ...state, jobs: state.jobs.map(j => j.id === active!.id ? { ...j, status: 'failed', completedAt: cursor, error: course ? 'Демонстрационная ошибка источника. Нажмите «Повторить», чтобы продолжить демо.' : 'Курс больше недоступен.' } : j) }
+      state = { ...state, jobs: state.jobs.map(j => j.id === active!.id ? { ...j, status: 'failed', completedAt: cursor, error: course ? 'Демонстрационная ошибка источника. Нажмите «Повторить», чтобы продолжить демо.' : 'Категория больше недоступна.' } : j) }
     } else {
       const noteId = `note-${active.id}`
       const note: Note = { id: noteId, courseId: active.courseId, title: active.title, markdown: buildMockMarkdown(active), createdAt: cursor, jobId: active.id }
@@ -85,8 +85,15 @@ export function parseState(raw: string | null): AppState {
   if (!raw) return initialState()
   const state = JSON.parse(raw) as AppState
   if (state.version !== 1 || !Array.isArray(state.courses) || !Array.isArray(state.notes) || !Array.isArray(state.jobs) || !Array.isArray(state.expandedCourses)) throw new Error('Неверный формат библиотеки')
-  if (state.courses.some(c => typeof c.id !== 'string' || typeof c.title !== 'string' || !['personal', 'shared'].includes(c.workspace))) throw new Error('Неверный формат курсов')
+  if (state.courses.some(c => typeof c.id !== 'string' || typeof c.title !== 'string' || !['personal', 'shared'].includes(c.workspace))) throw new Error('Неверный формат категорий')
   if (state.notes.some(n => typeof n.id !== 'string' || typeof n.title !== 'string' || typeof n.markdown !== 'string')) throw new Error('Неверный формат конспектов')
   if (state.jobs.some(j => typeof j.id !== 'string' || typeof j.title !== 'string' || typeof j.sourceName !== 'string' || !Object.hasOwn(STATUS_LABELS, j.status) || !['file', 'url'].includes(j.sourceType) || !Number.isFinite(j.createdAt) || (j.sourceType === 'url' && validateUrl(j.sourceName)))) throw new Error('Неверный формат очереди')
   return { ...state, readerTheme: state.readerTheme === 'light' ? 'light' : 'dark' }
+}
+
+export function slidePolicy(limit: number | null | undefined) {
+  if (limit === null) return 'Без ограничения'
+  if (limit === 0) return 'Только PDF'
+  if (limit === 3) return 'Только ключевые · до 3'
+  return `По теме · до ${limit ?? 6}`
 }

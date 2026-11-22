@@ -56,7 +56,7 @@ export function SettingsPage() {
   }
   const removeAccount = (event: FormEvent) => {
     event.preventDefault()
-    if (!window.confirm('Удалить аккаунт, личные материалы и принадлежащие вам общие курсы для всех участников? Это действие нельзя отменить.')) return
+    if (!window.confirm('Удалить аккаунт, личные материалы и принадлежащие вам общие категории для всех участников? Это действие нельзя отменить.')) return
     void run('account', async () => {
       await api('/account', { method: 'DELETE', body: JSON.stringify({ password: deletionPassword }) })
       setDeletionPassword('')
@@ -92,7 +92,6 @@ export function SettingsPage() {
         </section>
         <section className="settings-section settings-sessions">
           <h2>Сеансы</h2>
-          <p className="field-hint">Завершите вход на других устройствах или выйдите из аккаунта.</p>
           <div className="settings-session-actions">
             <Button size="sm" variant="outline" disabled={busy} onClick={() => void run('security', async () => { await api('/auth/logout-all', { method: 'POST' }); auth.clear(); navigate('/login') })}>Завершить все сеансы</Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run('security', async () => { await auth.logout(); navigate('/login') })}>Выйти</Button>
@@ -100,7 +99,7 @@ export function SettingsPage() {
         </section>
         <details className="account-removal">
           <summary>Удалить аккаунт</summary>
-          <p>Будут удалены ваши подключения, личные материалы и общие курсы, которыми вы владеете. Заметки в чужих курсах сохранятся.</p>
+          <p>Будут удалены ваши подключения, личные материалы и общие категории, которыми вы владеете. Заметки в чужих категориях сохранятся.</p>
           <form className="settings-form" onSubmit={removeAccount}>
             <div className="settings-field"><label className="field-label" htmlFor="deletion-password">Пароль для подтверждения</label><input id="deletion-password" type="password" value={deletionPassword} onChange={event => setDeletionPassword(event.target.value)} autoComplete="current-password" maxLength={128} required /></div>
             <Button size="sm" variant="outline" type="submit" disabled={busy}>Удалить аккаунт и данные</Button>

@@ -195,7 +195,7 @@ def install_auth(app, settings):
         if not valid or not row or row['disabled']:
             raise HTTPException(401, 'Неверный email или пароль.')
         if settings.verify_email and not row['verified']:
-            raise HTTPException(403, 'Подтвердите email по ссылке из письма.')
+            raise HTTPException(403, {'code': 'EMAIL_UNVERIFIED', 'message': 'Подтвердите email по ссылке из письма.'})
         with connect(settings) as db:
             db.execute('BEGIN IMMEDIATE')
             # Recheck after the expensive hash in case a password reset raced login.

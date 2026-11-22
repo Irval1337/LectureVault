@@ -1,0 +1,12 @@
+services:
+  providers:
+    environment:
+      LV_LOCAL_MODEL_BASES: http://model-api:8091/v1
+  model-api:
+    build: {context: ., dockerfile: deploy/Dockerfile.api, target: api}
+    command: ["python", "/test/model_service.py"]
+    volumes: ["./tests/model_service.py:/test/model_service.py:ro"]
+    networks: [accounts]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]

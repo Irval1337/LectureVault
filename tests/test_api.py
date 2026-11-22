@@ -149,8 +149,8 @@ def test_real_membership_editor_viewer_and_revocation(env):
 
 def test_membership_requires_shared_course_registered_user_and_owner(env):
     c, _, _, _ = env
-    personal = course(c)
-    assert c.post(f'/api/courses/{personal}/members', json={'email': 'reader@example.com'}).status_code == 422
+    personal = course(c, title='Первый курс')
+    assert c.post(f'/api/courses/{personal}/members', json={'email': 'reader@example.com'}).status_code == 200
     shared = course(c, 'shared')
     assert c.post(f'/api/courses/{shared}/members', json={'email': 'unknown@example.com'}).status_code == 404
     assert c.post(f'/api/courses/{shared}/members', json={'email': None}).status_code == 422
@@ -386,3 +386,126 @@ def test_invalid_job_does_not_consume_daily_job_quota(env):
     digest = hashlib.sha256(('jobs-day:' + author['id']).encode()).hexdigest()
     with connect(settings) as db:
         assert db.execute('SELECT count FROM rate_limits WHERE key=?', (digest,)).fetchone()[0] == 1
+
+
+def test_invite_is_private_single_use_revocable_and_expires(env):
+    c, settings, _, _ = env
+    cid = course(c)
+    route = f'/api/courses/{cid}/invite'
+    token = c.post(route, json={'role':'viewer'}).json()
+    login(c, 'reader')
+    assert c.get(f'/api/courses/{cid}/members').status_code == 404
+    assert c.post(route, json={'role':'editor'}).status_code in (403, 404)
+    assert c.post('/api/invitations/preview', json=token).json()['role'] == 'viewer'
+    login(c)
+    assert c.delete(route).is_success
+    assert c.post('/api/invitations/accept', json=token).status_code == 404
+    token = c.post(route, json={'role':'editor'}).json()
+    with connect(settings) as db:
+        db.execute('UPDATE course_invites SET expires=0')
+    assert c.post('/api/invitations/accept', json=token).status_code == 404
+    token = c.post(route, json={'role':'viewer'}).json()
+    login(c, 'reader')
+    assert c.post('/api/invitations/accept', json=token).json()['id'] == cid
+    assert c.post('/api/invitations/accept', json=token).status_code == 404
+    assert c.post('/api/notes', json={'courseId':cid}).status_code == 403
+
+
+def test_category_and_icon_follow_course_access_and_preserve_markdown(env):
+    c, _, _, _ = env
+    cid = course(c, 'shared')
+    original = note(c, cid)
+    path = f"/api/notes/{original['id']}/category"
+    icon = f"/api/courses/{cid}/icon"
+    assert c.put(icon, json={'icon': 'math'}).status_code == 200
+    share(c, cid, 'viewer')
+    login(c, 'reader')
+    assert c.put(path, json={'path': 'Алгебра'}).status_code == 403
+    assert c.put(icon, json={'icon': 'music'}).status_code == 403
+    login(c)
+    for invalid in ('A//B', 'A/..', 'x/' * 7 + 'x'):
+        assert c.put(path, json={'path': invalid}).status_code == 422
+    assert c.put(path, json={'path': ' Алгебра / Группы '}).status_code == 200
+    login(c, 'reader')
+    state = c.get('/api/state').json()
+    assert state['notes'][0]['category'] == 'Алгебра/Группы'
+    assert state['courses'][0]['icon'] == 'math'
+    current = c.get(f"/api/notes/{original['id']}").json()
+    assert current['revision'] == original['revision']
+    assert current['markdown'] == original['markdown']
+    login(c)
+    assert c.put(path, json={'path': ''}).status_code == 200
+    assert c.get('/api/state').json()['notes'][0]['category'] == ''
+
+
+def test_empty_subcategories_permissions_and_generated_note_destination(env):
+    c, settings, _, _ = env
+    root = course(c, 'shared')
+    folders = f'/api/courses/{root}/folders'
+    assert c.post(folders, json={'name': 'Анализ'}).status_code == 201
+    assert c.post(folders, json={'name': 'Лекции', 'parent': 'Анализ'}).status_code == 201
+    assert c.post(folders, json={'name': 'Лекции', 'parent': 'Анализ'}).status_code == 409
+    assert c.post(folders, json={'name': 'Лекции', 'parent': 'Другое'}).status_code == 404
+    assert c.post(folders, json={'name': 'A/B'}).status_code == 422
+    share(c, root, 'viewer')
+    login(c, 'reader')
+    assert c.get('/api/state').json()['courses'][0]['folders'] == ['Анализ', 'Анализ/Лекции']
+    assert c.post(folders, json={'name': 'Тест'}).status_code == 403
+    login(c)
+    payload = {'courseId': root, 'category': 'Анализ/Лекции', 'mode': 'mock', 'title': 'Предел', 'sourceType': 'url', 'sourceName': 'https://example.com/video'}
+    assert c.post('/api/jobs', data={'metadata': json.dumps(payload)}).status_code == 201
+    run_job(settings, claim(settings))
+    assert c.get('/api/state').json()['notes'][0]['category'] == 'Анализ/Лекции'
+
+
+def test_category_rename_and_lift_preserve_contents_permissions_and_running_job(env):
+    c, settings, _, reader = env
+    root = course(c, 'shared', 'Технологии')
+    folders = f'/api/courses/{root}/folders'
+    icon = f'/api/courses/{root}/icon'
+    for parent, name in [('', 'A%'), ('A%', 'A%'), ('', 'A_')]:
+        c.post(folders, json={'name': name, 'parent': parent}).raise_for_status()
+    child = 'A%/A%'
+    c.put(icon, json={'path': child, 'icon': 'code'}).raise_for_status()
+    original = note(c, root, '## Язык\n\n`SELECT 1`')
+    item = f"/api/notes/{original['id']}"
+    c.put(item + '/category', json={'path': child, 'existingOnly': True}).raise_for_status()
+    body = {'courseId': root, 'category': child, 'mode': 'mock', 'title': 'План', 'sourceType': 'url', 'sourceName': 'https://example.com/video'}
+    c.post('/api/jobs', data={'metadata': json.dumps(body)}).raise_for_status()
+    running = claim(settings)
+    rename = {'path': 'A%', 'operation': 'rename', 'name': 'Раздел'}
+    share(c, root)
+    for role in ('viewer', 'editor'):
+        c.put(f"/api/courses/{root}/members/{reader['id']}", json={'role': role}).raise_for_status()
+        login(c, 'reader')
+        assert c.patch(folders, json=rename).status_code == 403
+        assert c.put(icon, json={'path': child, 'icon': 'music'}).status_code == 403
+        login(c)
+    assert c.patch(folders, json={**rename, 'name': 'A_'}).status_code == 409
+    c.patch(folders, json=rename).raise_for_status()
+    assert c.put(item + '/category', json={'path': child, 'existingOnly': True}).status_code == 404
+    run_job(settings, running)
+    state = c.get('/api/state').json()
+    assert len(state['notes']) == 2 and {n['category'] for n in state['notes']} == {'Раздел/A%'}
+    c.patch(folders, json={'path': 'Раздел', 'operation': 'rename', 'name': 'A%'}).raise_for_status()
+    c.patch(folders, json={'path': 'A%', 'operation': 'remove-level'}).raise_for_status()
+    c.patch(folders, json={'path': '', 'operation': 'rename', 'name': 'Основы'}).raise_for_status()
+    state = c.get('/api/state').json()
+    category = state['courses'][0]
+    assert category['title'] == 'Основы' and set(category['folders']) == {'A%', 'A_'}
+    assert category['folderIcons'] == {'A%': 'code'}
+    assert {n['category'] for n in state['notes']} == {'A%'}
+    assert c.get(item + '/export').text == original['markdown']
+    assert c.get(item).json()['revision'] == original['revision']
+
+
+def test_slide_placement_follows_explanation_and_preserves_code_examples():
+    from backend.slides import embed_slides
+    doc = '## Раздел\n\n[[slide:1]]\n\nОбъяснение.\n\n[[slide:2]]\n\n```text\n[[slide:3]]\n```\n\n[[slide:1]]\n[[slide:499]]'
+    result = embed_slides(doc, 'asset', 3, None)
+    assert result.index('Объяснение.') < result.index('![Слайд 1]') < result.index('![Слайд 2]')
+    assert result.count('![Слайд') == 2
+    assert '```text\n[[slide:3]]\n```' in result
+    assert embed_slides('## Раздел\n\nТекст.', 'asset', 9, None) == '## Раздел\n\nТекст.'
+    assert '![Слайд' not in embed_slides(doc, 'asset', 3, 0)
+    assert embed_slides(doc, 'asset', 3, 1).count('![Слайд') == 1

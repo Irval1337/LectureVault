@@ -7,13 +7,10 @@ import { Button } from './ui/button'
 import { Dialog } from './ui/dialog'
 import { useSession } from '../data/store'
 
-export type Provider = { id: ProviderId; name: string; connected: boolean; models: { id: string; name: string; efforts: string[] }[]; login: { status: string; url?: string; userCode?: string } }
-export type GenerationOptions = { provider: ProviderId; model: string; effort: 'low' | 'medium' | 'high' | 'xhigh' }
-export const defaultGeneration: GenerationOptions = { provider: 'codex', model: 'gpt-6.1-sol', effort: 'medium' }
-const keyConnections = {
-  claude: { service: 'Anthropic API', subscription: 'Claude', example: 'sk-ant-…' },
-  openai: { service: 'OpenAI API', subscription: 'ChatGPT', example: 'sk-…' },
-}
+export type Provider = { id: ProviderId; name: string; connected: boolean; managedBy?: string; baseUrl?: string; catalogError?: string; models: { id: string; name: string; efforts: string[] }[]; login: { status: string; url?: string; userCode?: string } }
+export type GenerationOptions = { apiBase?: string; provider: ProviderId; model: string; effort: 'low' | 'medium' | 'high' | 'xhigh' }
+export const defaultGeneration: GenerationOptions = { provider: 'codex', model: '', effort: 'medium' }
+const endpoints = ['https://api.openai.com/v1', 'https://api.anthropic.com/v1', 'https://generativelanguage.googleapis.com/v1beta/openai', 'http://host.docker.internal:11434/v1']
 
 export function ProviderConnections({ small = false, account = false }: { small?: boolean; connectProvider?: Provider['id']; account?: boolean }) {
   const session = useSession()
@@ -28,6 +25,8 @@ export function ConnectionSettings() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [activeDialog, setActiveDialog] = useState<Provider['id'] | null>(null)
+  const [baseUrl, setBaseUrl] = useState(endpoints[0])
+  const [workspace, setWorkspace] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [copied, setCopied] = useState(false)
   const [password, setPassword] = useState('')
@@ -38,11 +37,11 @@ export function ConnectionSettings() {
     .catch(error => setError(error.message))
   useEffect(() => {
     void load()
+    if (activeDialog !== 'codex') return
     const timer = window.setInterval(load, 4000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [activeDialog])
   const codex = providers.find(provider => provider.id === 'codex')
-  const keyConnection = activeDialog && activeDialog !== 'codex' ? keyConnections[activeDialog] : undefined
   useEffect(() => {
     if (activeDialog === 'codex' && codex?.connected) {
       setActiveDialog(null); setNotice('Codex подключён.')
@@ -55,9 +54,9 @@ export function ConnectionSettings() {
   const action = async (provider: ProviderId, command: 'key' | 'connect' | 'disconnect', key?: string) => {
     setBusy(provider); setError(''); setNotice('')
     try {
-      await api(`/providers/${provider}/${command}`, { method: 'POST', body: JSON.stringify(command === 'key' ? { apiKey: key } : {}) })
-      if (command === 'key') { setApiKey(''); setActiveDialog(null); setNotice(`Ключ ${PROVIDER_NAMES[provider]} сохранён.`) }
-      if (command === 'disconnect') { setActiveDialog(null); setNotice(provider === 'codex' ? 'Подключение Codex отключено.' : `Ключ ${PROVIDER_NAMES[provider]} удалён.`) }
+      await api(`/providers/${provider}/${command}`, { method: 'POST', body: JSON.stringify(command === 'key' ? { apiKey: key ?? '', baseUrl: provider === 'claude' ? endpoints[1] : baseUrl.trim(), workspace: provider === 'claude' ? '' : workspace.trim() } : {}) })
+      if (command === 'key') { setApiKey(''); setActiveDialog(null); setNotice('Подключение сохранено.') }
+      if (command === 'disconnect') { setActiveDialog(null); setNotice(provider === 'openai' ? 'API отключён.' : `${PROVIDER_NAMES[provider]} отключён.`) }
       setCopied(false); await load()
     } catch (error) {
       if (error instanceof ApiError && error.status === 428) { pending.current = () => action(provider, command, key); setReauth(true) }
@@ -65,7 +64,7 @@ export function ConnectionSettings() {
     } finally { setBusy('') }
   }
   const openConnection = (provider: Provider) => {
-    setError(''); setNotice(''); setActiveDialog(provider.id)
+    setError(''); setNotice(''); setApiKey(''); setBaseUrl(provider.baseUrl || endpoints[0]); setWorkspace(''); setActiveDialog(provider.id)
     if (provider.id === 'codex' && !['starting', 'waiting'].includes(provider.login.status)) void action('codex', 'connect')
   }
   const confirmPassword = async (event: FormEvent) => {
@@ -79,27 +78,26 @@ export function ConnectionSettings() {
   const waiting = codex && ['starting', 'waiting'].includes(codex.login.status)
   return <section id="connections" className="settings-section connection-settings">
     <h2 className="sr-only">Подключения</h2>
-    <p className="settings-intro">Подключите свой аккаунт для генерации из видео. Писать заметки можно без AI.</p>
     <div className="provider-connections">
       {!providers.length && !error && <p role="status" className="field-hint">Проверяем подключения…</p>}
       {providers.map(provider => <div key={provider.id} className="provider-row">
         <div className="provider-heading">
           <strong>{provider.name}</strong>
           <span role="status" className={provider.connected ? 'provider-connected' : ''}>
-            {provider.connected ? provider.id === 'codex' ? 'Подключён' : 'Ключ сохранён' : provider.id === 'codex' && waiting ? 'Ожидаем входа' : provider.login.status === 'unavailable' ? 'Недоступен' : 'Не подключён'}
+            {provider.connected ? 'Подключён' : provider.id === 'codex' && waiting ? 'Ожидаем входа' : provider.login.status === 'unavailable' ? 'Недоступен' : 'Не подключён'}
           </span>
         </div>
-        <p className="provider-description">{provider.id === 'codex' ? 'Аккаунт ChatGPT' : provider.id === 'claude' ? 'Ключ Anthropic · оплата по API' : 'Ключ OpenAI · оплата по API'}</p>
-        {provider.connected
-          ? <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { if (window.confirm(`Отключить ${provider.name}? Ваши заметки сохранятся.`)) void action(provider.id, 'disconnect') }}>Отключить</Button>
-          : <Button size="sm" variant="outline" disabled={!!busy || provider.login.status === 'unavailable'} onClick={() => openConnection(provider)} aria-label={`Подключить ${provider.name}`}>
+        <p className="provider-description">{provider.id === 'codex' ? 'Аккаунт ChatGPT' : provider.id === 'claude' ? (provider.managedBy ? 'Использует ключ из «Свой API»' : 'Ключ Anthropic API') : provider.baseUrl || 'OpenAI, Claude, Gemini или локальная модель'}</p>
+        {provider.managedBy ? <Button size="sm" variant="ghost" onClick={() => { const owner = providers.find(p => p.id === provider.managedBy); if (owner) openConnection(owner) }}>Настроить ключ</Button> : provider.connected
+          ? <div className="provider-actions">{provider.id === 'openai' && <Button size="sm" variant="outline" disabled={!!busy} onClick={() => openConnection(provider)}>Изменить</Button>}<Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { if (window.confirm(`Отключить ${provider.id === 'openai' ? 'API' : provider.name}?`)) void action(provider.id, 'disconnect') }}>Отключить</Button></div>
+          : <Button size="sm" variant="outline" disabled={!!busy || provider.login.status === 'unavailable'} onClick={() => openConnection(provider)} aria-label={provider.id === 'openai' ? 'Подключить API' : `Подключить ${provider.name}`}>
             {provider.id === 'codex' && waiting ? 'Продолжить вход' : 'Подключить'}
           </Button>}
       </div>)}
       {error && !activeDialog && !reauth && <p role="alert" className="field-error">{error}</p>}
       {notice && <p role="status" className="auth-notice">{notice}</p>}
     </div>
-    <Dialog open={!!activeDialog} onOpenChange={open => { if (!open) closeDialog() }} title={`Подключить ${activeDialog ? PROVIDER_NAMES[activeDialog] : ''}`} description={keyConnection ? `Используйте собственный ключ ${keyConnection.service}.` : 'Подтвердите вход в ваш аккаунт на странице OpenAI.'} className="connection-dialog">
+    <Dialog open={!!activeDialog} onOpenChange={open => { if (!open) closeDialog() }} title={activeDialog === 'openai' ? 'Настроить API' : activeDialog === 'claude' ? 'Подключить Claude Code' : 'Подключить Codex'} description={activeDialog === 'openai' ? 'Сервер с поддержкой OpenAI Chat Completions.' : activeDialog === 'claude' ? 'Используется ключ из консоли Anthropic.' : 'Подтвердите вход в ваш аккаунт на странице OpenAI.'} className="connection-dialog">
       {activeDialog === 'codex' && <>
         {codex?.login.url && waiting ? <div className="provider-login">
           <div className="device-code-row"><code className="device-code" aria-label="Одноразовый код">{codex.login.userCode || 'Получаем код…'}</code><Button size="sm" variant="ghost" disabled={!codex.login.userCode} onClick={() => { void navigator.clipboard.writeText(codex.login.userCode!).then(() => setCopied(true)).catch(() => setError('Выделите код и скопируйте его вручную.')) }}>{copied ? 'Скопировано' : 'Скопировать'}</Button></div>
@@ -110,11 +108,15 @@ export function ConnectionSettings() {
         <details className="connection-help"><summary>Не получается войти?</summary><p>OpenAI может попросить разрешить вход по коду в настройках безопасности ChatGPT.</p><a href="https://learn.chatgpt.com/docs/auth" target="_blank" rel="noopener noreferrer">Инструкция OpenAI</a></details>
         <div className="dialog-actions"><Button variant="ghost" disabled={!!busy} onClick={() => void action('codex', 'disconnect')}>Отменить вход</Button></div>
       </>}
-      {activeDialog && keyConnection && <form className="provider-key-form" onSubmit={event => { event.preventDefault(); void action(activeDialog, 'key', apiKey.trim()) }}>
-        <label className="field-label" htmlFor="provider-api-key">Ключ {keyConnection.service}</label>
-        <input id="provider-api-key" type="password" value={apiKey} autoComplete="off" spellCheck={false} maxLength={512} placeholder={keyConnection.example} onChange={event => setApiKey(event.target.value)} required />
-        <p className="field-hint">Расходы по API учитываются отдельно от подписки {keyConnection.subscription}. После сохранения ключ можно удалить в настройках.</p>
-        <div className="dialog-actions"><Button type="button" variant="ghost" onClick={closeDialog}>Отмена</Button><Button size="sm" disabled={!apiKey.trim() || !!busy} type="submit">Сохранить ключ</Button></div>
+      {(activeDialog === 'openai' || activeDialog === 'claude') && <form className="provider-key-form" onSubmit={event => { event.preventDefault(); void action(activeDialog, 'key', apiKey.trim()) }}>
+        {activeDialog === 'openai' && <><label className="field-label" htmlFor="provider-base">Адрес API (Base URL)</label>
+        <input id="provider-base" type="url" list="api-endpoints" value={baseUrl} onChange={event => { setBaseUrl(event.target.value); setApiKey('') }} maxLength={500} required />
+        <datalist id="api-endpoints">{endpoints.map((url,index) => <option key={url} value={url}>{['OpenAI','Anthropic','Gemini','Ollama'][index]}</option>)}</datalist></>}
+        <label className="field-label" htmlFor="provider-api-key">API-ключ</label>
+        <input id="provider-api-key" type="password" value={apiKey} autoComplete="off" spellCheck={false} maxLength={512} onChange={event => setApiKey(event.target.value)} />
+        {activeDialog === 'openai' && baseUrl.startsWith('http://') && <p className="field-hint">Для локального сервера без авторизации оставьте ключ пустым. Адрес должен быть разрешён владельцем LectureVault.</p>}
+        {activeDialog === 'openai' && baseUrl.replace(/\/+$/, '') === endpoints[1] && <><label className="field-label" htmlFor="api-workspace">Anthropic Workspace ID · при необходимости</label><input id="api-workspace" value={workspace} maxLength={100} onChange={event => setWorkspace(event.target.value)}/></>}
+        <div className="dialog-actions"><Button type="button" variant="ghost" onClick={closeDialog}>Отмена</Button><Button size="sm" disabled={(activeDialog === 'claude' ? !apiKey.trim() : !baseUrl.trim()) || !!busy} type="submit">Сохранить подключение</Button></div>
       </form>}
       {error && !reauth && <p role="alert" className="field-error">{error}</p>}
     </Dialog>
@@ -130,23 +132,33 @@ export function ProviderOptions({ value, onChange, onAvailabilityChange }: { val
   useEffect(() => { void api<{ providers: Provider[] }>('/providers').then(result => setProviders(result.providers)).catch(error => setError(error.message)) }, [])
   const provider = providers.find(item => item.id === value.provider)
   const model = provider?.models.find(item => item.id === value.model)
-  useEffect(() => { onAvailabilityChange?.(!!provider?.connected) }, [provider?.connected, value.provider])
+  useEffect(() => {
+    if (!providers.length) return
+    const choice = provider || providers[0]
+    const next = model || choice.models[0]
+    if (next && (!model || !provider || choice.baseUrl !== value.apiBase || (next.efforts.length > 0 && !next.efforts.includes(value.effort)))) {
+      onChange({ provider: choice.id, apiBase: choice.baseUrl, model: next.id, effort: next.efforts.includes('medium') ? 'medium' : (next.efforts[0] as GenerationOptions['effort']) || 'medium' })
+    } else if (!provider) onChange({ provider: choice.id, model: '', effort: 'medium' })
+  }, [providers, provider, model])
+  const manual = provider?.connected && !provider.models.length && provider.id !== 'codex'
+  useEffect(() => { onAvailabilityChange?.(!!provider?.connected && (!!model || (!!manual && !!value.model.trim()))) }, [provider, model, manual, value.model])
   return <div className="provider-options">
-    <div className="provider-picker">
-      <label className="field-label" htmlFor="generation-provider">Провайдер</label>
+    <div className="provider-picker"><label className="field-label" htmlFor="generation-provider">Провайдер</label>
       <select id="generation-provider" value={value.provider} onChange={event => {
         const next = providers.find(item => item.id === event.target.value)
-        if (next) onChange({ provider: next.id, model: next.models[0].id, effort: 'medium' })
-      }}>{providers.length ? providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>) : <option value={value.provider}>{PROVIDER_NAMES[value.provider]}</option>}</select>
-      {provider && !provider.connected && <p className="field-hint">{provider.name} не подключён. <Link to="/settings#connections" state={{ fromGeneration: true }}>Подключить в настройках</Link></p>}
+        if (next) onChange({ provider: next.id, apiBase: next.baseUrl, model: next.models[0]?.id ?? '', effort: 'medium' })
+      }}>{providers.length ? providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>) : <option>{PROVIDER_NAMES[value.provider]}</option>}</select>
+      {provider && !provider.connected && <p className="field-hint"><Link to="/settings#connections" state={{ fromGeneration: true }}>Подключить в настройках</Link></p>}
+      {provider?.baseUrl && <p className="field-hint">{provider.baseUrl}</p>}
     </div>
-    <div className="provider-model-effort">
-      <div><label className="field-label" htmlFor="generation-model">Модель</label><select id="generation-model" value={value.model} onChange={event => {
-        const next = provider?.models.find(item => item.id === event.target.value)
-        if (next) onChange({ ...value, model: next.id, effort: next.efforts.includes(value.effort) ? value.effort : 'medium' })
-      }}>{provider?.models.map(item => <option key={item.id} value={item.id}>{item.name}</option>) ?? <option value={value.model}>{value.model}</option>}</select></div>
-      <div><label className="field-label" htmlFor="generation-effort">Effort</label><select id="generation-effort" value={value.effort} onChange={event => onChange({ ...value, effort: event.target.value as GenerationOptions['effort'] })}>{(model?.efforts ?? ['low', 'medium', 'high']).map(effort => <option key={effort} value={effort}>{{ low: 'Низкий', medium: 'Средний', high: 'Высокий', xhigh: 'Очень высокий' }[effort]}</option>)}</select></div>
-    </div>
+    {provider?.connected && <div className="provider-model-effort"><div><label className="field-label" htmlFor="generation-model">Модель</label>
+      {manual ? <input id="generation-model" maxLength={180} value={value.model} placeholder="Идентификатор модели" onChange={event => onChange({ ...value, apiBase: provider.baseUrl, model: event.target.value })} /> :
+      <select id="generation-model" value={value.model} onChange={event => {
+        const next = provider.models.find(item => item.id === event.target.value)
+        if (next) onChange({ ...value, model: next.id, effort: next.efforts.includes(value.effort) ? value.effort : (next.efforts[0] as GenerationOptions['effort']) || 'medium' })
+      }}>{provider.models.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}
+      {provider.catalogError && <p className="field-hint">{provider.catalogError} {manual && 'Введите идентификатор вручную.'}</p>}</div>
+      {!!model?.efforts.length && <div><label className="field-label" htmlFor="generation-effort">Глубина рассуждения</label><select id="generation-effort" value={value.effort} onChange={event => onChange({ ...value, effort: event.target.value as GenerationOptions['effort'] })}>{model.efforts.map(effort => <option key={effort} value={effort}>{{low:'Низкая',medium:'Средняя',high:'Высокая',xhigh:'Максимальная'}[effort]}</option>)}</select></div>}</div>}
     {error && <p role="alert" className="field-error">{error}</p>}
   </div>
 }

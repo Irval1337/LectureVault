@@ -1,0 +1,51 @@
+.reader-page .content-body:has(.note-editor) { width: 100%; max-width: none; }
+.reader-page .content-body > .note-editor { width: 100%; max-width: 960px; }
+.note-editor .editor-settings-slot:empty { display: none; }
+.editor-image-settings { padding: 10px; display: grid; gap: 12px; }
+.editor-image-settings label { display: grid; gap: 6px; font: 500 13px/1.4 var(--font-ui); }
+.editor-image-settings .button { justify-content: center; }
+.note-editor .crepe-host .milkdown .ProseMirror { width: 100%; max-width: none; margin: 0; padding-inline: 0; }
+.note-editor .crepe-host .milkdown .milkdown-top-bar { width: 100%; margin-inline: 0; padding-inline: 0; border-bottom: 1px solid var(--border-default); }
+.note-editor .crepe-host .milkdown .milkdown-top-bar .top-bar-heading-selector { padding-inline-start: 0; }
+.picture-drop-indicator { position: fixed; z-index: 20; pointer-events: none; background: var(--accent); }
+.crepe-host .milkdown .milkdown-image-block .image-wrapper .image-resize-handle { display: none; }
+.crepe-host .milkdown .milkdown-image-inline { position: relative; }
+.crepe-host .milkdown .milkdown-image-block.selected > .image-wrapper::before { pointer-events: none; }
+.crepe-host .milkdown :is(.image-wrapper, .milkdown-image-inline) > img { cursor: grab; object-fit: contain; }
+.picture-size-controls {
+  position: absolute; inset: 0; pointer-events: none; opacity: 0;
+  outline: 1px solid var(--accent); border-radius: 2px;
+}
+.crepe-host :is(.image-wrapper:hover, .milkdown-image-inline:hover, .selected, :focus-within) > .picture-size-controls,
+.crepe-host .selected > .image-wrapper > .picture-size-controls, .picture-size-controls.resizing { opacity: 1; }
+.crepe-host :is(.image-wrapper:hover, .milkdown-image-inline:hover, .selected, :focus-within) > .picture-size-controls > *,
+.crepe-host .selected > .image-wrapper > .picture-size-controls > *, .picture-size-controls.resizing > * { pointer-events: auto; }
+.crepe-host .milkdown .picture-scale {
+  position: absolute; left: 4px; top: 4px; width: auto; min-height: 26px;
+  padding: 2px 4px; font: 500 12px/1.4 var(--font-ui); color: var(--text-primary);
+  background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 4px;
+}
+.picture-grip {
+  position: absolute; bottom: -8px; width: 20px; height: 20px;
+  display: grid; place-items: center; touch-action: none; user-select: none;
+}
+.picture-grip::after {
+  content: ''; width: 10px; height: 10px; background: var(--surface-page);
+  border: 2px solid var(--accent); border-radius: 2px;
+}
+.picture-grip.grip-left { left: -8px; cursor: nesw-resize; }
+.picture-grip.grip-right { right: -8px; cursor: nwse-resize; }
+.table-insert-tools { display: flex; justify-content: center; flex-wrap: wrap; gap: 4px; margin: 0 0 12px; }
+.crepe-host .milkdown .table-insert-tools button {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 3px 8px;
+  color: var(--text-body); border: 1px solid var(--border-default); border-radius: 5px;
+  font: 500 12px/1.4 var(--font-ui); cursor: pointer;
+}
+.crepe-host .milkdown .table-insert-tools button:enabled:hover { color: var(--text-primary); background: var(--surface-raised); }
+.crepe-host .milkdown .table-insert-tools button:disabled { opacity: .45; cursor: default; }
+@media (pointer: coarse) {
+  .picture-grip { width: 32px; height: 32px; bottom: -14px; }
+  .picture-grip.grip-left { left: -14px; }
+  .picture-grip.grip-right { right: -14px; }
+  .crepe-host .milkdown .table-insert-tools button { min-height: 40px; }
+}

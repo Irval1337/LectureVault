@@ -1,23 +1,30 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
+import { Fragment, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, ArrowRight, BookOpen, BookOpenText, Check, CheckCircle2, ChevronDown, ChevronRight, Circle, Clock3, FileText, Folder, FolderOpen, HelpCircle, House, Link2, ListOrdered, LoaderCircle, Plus, Search, Upload, Users, X, XCircle } from 'lucide-react'
+import { ArrowLeft, ArrowRight, BookOpen, Check, CheckCircle2, ChevronDown, ChevronRight, Circle, Clock3, FileText, Folder, ListOrdered, LoaderCircle, PanelLeftClose, Plus, Search, Upload, X, XCircle } from 'lucide-react'
 import { Button } from './components/ui/button'
-import { ActionMenu } from './components/ui/action-menu'
+import { Brand } from './components/brand'
+import { openRowActions } from './components/ui/action-menu'
 import { Dialog } from './components/ui/dialog'
 import { TabBar } from './components/ui/tab-bar'
 import { PageHeading } from './components/ui/page-heading'
 import { ActivityRail, WorkspaceHeader, ReaderActions, ReaderInspector } from './components/workspace'
 import { library, useLibrary, useSession } from './data/store'
 import { CreateNotePage, type GenerationDraft } from './components/create-note'
+import { CourseIcon, IconPicker, DirectoryRow, CategoryMenu, type CategoryAction, NoteActions, NoteBranches, CategoryOptions, childFolders, folderLink } from './components/organization'
 import { CourseMembers } from './components/course-members'
 import { ProviderConnections } from './components/providers'
 const NoteEditor = lazy(() => import('./components/editor'))
+import { initializeTheme, ThemeButton } from './components/theme'
+import { Invitation } from './components/invitation'
+import { Presentation } from './components/presentation'
 import { SettingsPage } from './components/settings'
-import { PROVIDER_NAMES, isActive, LENGTH_LABELS, STAGES, STATUS_LABELS, type AppState, type Course, type Job, type Note, type Workspace } from './data/model'
+import { slidePolicy, PROVIDER_NAMES, isActive, LENGTH_LABELS, STAGES, STATUS_LABELS, type AppState, type Course, type Job, type Note } from './data/model'
 import { formatDate, plural } from './lib/utils'
 import { QuartzArticle, QuartzToc } from './components/reader'
 
-const spaceLabel = (space: Workspace) => space === 'personal' ? 'Моя библиотека' : 'Общая библиотека'
+import type { TocEntry } from './quartz/reader'
+
+const emptyOutline: TocEntry[] = []
 
 export default function App() {
   const generationDraft = useRef<GenerationDraft>({})
@@ -33,27 +40,38 @@ export default function App() {
   const navigate = useNavigate()
   const basePath = ''
   const state = savedState
-  const [space, setSpace] = useState<Workspace>(() => localStorage.getItem(`lecturevault.space.${session.user?.id}`) === 'shared' ? 'shared' : 'personal')
   const [search, setSearch] = useState('')
   const [courseDialog, setCourseDialog] = useState(false)
   const [createAndStart, setCreateAndStart] = useState(false)
   const [mobileNav, setMobileNav] = useState(false)
-  const [help, setHelp] = useState(false)
   const [navCollapsed, setNavCollapsed] = useState(false)
   const [contextOpen, setContextOpen] = useState(true)
   const searchTimer = useRef<number | undefined>(undefined)
   const [courseTitle, setCourseTitle] = useState('')
+  const [folderParent, setFolderParent] = useState<{root: Course; path: string} | null>(null)
+  const [categoryChange, setCategoryChange] = useState<{root: Course; path: string; action: CategoryAction} | null>(null)
+  const [categoryBusy, setCategoryBusy] = useState(false)
   const [courseError, setCourseError] = useState('')
   const activeNote = state.notes.find(n => location.pathname === `${basePath}/notes/${n.id}` || location.pathname === `${basePath}/notes/${n.id}/edit`)
   const isEditing = location.pathname.endsWith('/edit')
   const activeCourse = state.courses.find(c => location.pathname === `${basePath}/courses/${c.id}` || c.id === activeNote?.courseId)
+  const activePath = activeNote?.category ?? new URLSearchParams(location.search).get('folder') ?? ''
   const isNew = location.pathname === '/new'
   const isQueue = location.pathname === '/queue'
   const isSettings = location.pathname === '/settings'
-  const courses = state.courses.filter(c => c.workspace === space)
+  const courses = state.courses
   const activeJobs = state.jobs.filter(j => isActive(j) || j.status === 'queued')
-  const selectedJob = state.jobs.find(j => j.id === new URLSearchParams(location.search).get('job')) ?? state.jobs.find(isActive) ?? state.jobs.at(-1)
-  const hasContext = Boolean((activeNote && !isEditing && contextOpen && (activeNote.jobId || /^#{2,4}\s/m.test(activeNote.markdown))) || (isQueue && selectedJob))
+  const noteId = activeNote?.id
+  const noteMarkdown = activeNote?.markdown
+  const [outline, setOutline] = useState<{ id: string; markdown: string; entries: TocEntry[] }>()
+  const updateOutline = useCallback((entries: TocEntry[]) => {
+    if (noteId && noteMarkdown !== undefined) setOutline({ id: noteId, markdown: noteMarkdown, entries })
+  }, [noteId, noteMarkdown])
+  const entries = outline && outline.id === noteId && outline.markdown === noteMarkdown ? outline.entries : emptyOutline
+  const hasSource = Boolean(activeNote?.jobId && state.jobs.some(job => job.id === activeNote.jobId))
+  const hasReaderContext = entries.length > 0 || hasSource
+  const hasContext = activeNote && !isEditing && contextOpen && hasReaderContext
+
 
   useEffect(() => {
     const tick = () => { if (!document.hidden) void library.tick() }
@@ -74,22 +92,23 @@ export default function App() {
     return () => window.removeEventListener('popstate', closeNavigation)
   }, [])
   useEffect(() => {
-    if (activeCourse) { setSpace(activeCourse.workspace); localStorage.setItem(`lecturevault.space.${session.user?.id}`, activeCourse.workspace) }
-  }, [activeCourse])
-  useEffect(() => {
     // Direct links to a document should reveal its location in the explorer.
-    if (activeNote && !savedState.expandedCourses.includes(activeNote.courseId)) library.toggleCourse(activeNote.courseId)
-  }, [activeNote?.id])
-  useEffect(() => { document.title = `${activeNote?.title ?? (isNew ? 'Сгенерировать конспект' : isQueue ? 'Очередь заданий' : isSettings ? 'Настройки' : activeCourse?.title ?? 'Библиотека')} · LectureVault` }, [activeNote, activeCourse, isNew, isQueue, isSettings])
+    if (activeCourse && (activeNote || activePath) && !savedState.expandedCourses.includes(activeCourse.id)) library.toggleCourse(activeCourse.id)
+  }, [activeNote?.id, activePath, activeCourse?.id])
+  useEffect(() => { document.title = `${activeNote?.title ?? (isNew ? 'Сгенерировать конспект' : isQueue ? 'Очередь заданий' : isSettings ? 'Настройки' : (activePath.split('/').at(-1) || activeCourse?.title) ?? 'Библиотека')} · LectureVault` }, [activeNote, activeCourse, activePath, isNew, isQueue, isSettings])
   useEffect(() => {
     if (!mobileNav) return
-    const before = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    const escape = (e: KeyboardEvent) => { if (e.key === 'Escape') setMobileNav(false) }
-    window.addEventListener('keydown', escape)
-    return () => { document.body.style.overflow = before; window.removeEventListener('keydown', escape) }
+    const desktop = window.matchMedia('(min-width: 768px)')
+    const closeOnDesktop = () => { if (desktop.matches) setMobileNav(false) }
+    desktop.addEventListener('change', closeOnDesktop)
+    closeOnDesktop()
+    return () => desktop.removeEventListener('change', closeOnDesktop)
   }, [mobileNav])
 
+  function toggleNavigator(collapsed: boolean) {
+    setNavCollapsed(collapsed)
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(collapsed ? '.expand-navigator' : '.desktop-sidebar .close-explorer')?.focus())
+  }
   function focusSearch() {
     setNavCollapsed(false)
     const mobile = window.innerWidth < 768
@@ -107,127 +126,331 @@ export default function App() {
     return () => { window.removeEventListener('keydown', key); window.clearTimeout(searchTimer.current) }
   }, [])
 
-  function openCourseDialog(start = false) { setMobileNav(false); setCourseTitle(''); setCourseError(''); setCreateAndStart(start); setCourseDialog(true) }
-  function startNew(courseId?: string) {
+  function openCourseDialog(start = false) { setFolderParent(null); setMobileNav(false); setCourseTitle(''); setCourseError(''); setCreateAndStart(start); setCourseDialog(true) }
+  function addFolder(root: Course, path: string) {
+    openCourseDialog()
+    setFolderParent({ root, path })
+  }
+  function startNew(courseId?: string, path?: string) {
     setMobileNav(false); setNewError('')
-    setNewCourseId(courseId ?? (activeCourse?.role !== 'viewer' ? activeCourse?.id : undefined) ?? courses.find(c => c.role !== 'viewer')?.id ?? '')
+    const id = courseId ?? (activeCourse?.role !== 'viewer' ? activeCourse?.id : undefined) ?? courses.find(c => c.role !== 'viewer')?.id ?? ''
+    const folder = path ?? (id === activeCourse?.id ? activePath : '')
+    setNewCourseId(id + (folder ? '/' + folder : ''))
     setNewDialog(true)
   }
   async function chooseNew(intent: 'manual' | 'generate') {
     setNewIntent(intent); setNewError('')
     if (!newCourseId) { setNewDialog(false); openCourseDialog(true); return }
+    const [root, ...parts] = newCourseId.split('/')
+    const category = parts.join('/')
     setCreating(true)
     try {
       if (intent === 'manual') {
-        const note = await library.createNote(newCourseId)
+        const note = await library.createNote(root, category)
         setNewDialog(false); navigate(`/notes/${note.id}/edit`)
-      } else { setNewDialog(false); navigate(`/new?course=${newCourseId}`) }
+      } else { setNewDialog(false); navigate('/new?' + new URLSearchParams({course: root, folder: category})) }
     } catch (error) { setNewError((error as Error).message) }
     finally { setCreating(false) }
   }
-  function switchSpace(value: Workspace) { setSpace(value); localStorage.setItem(`lecturevault.space.${session.user?.id}`, value); setSearch(''); setMobileNav(false); navigate('/') }
   function toggleCourse(id: string) { library.toggleCourse(id) }
-  function toggleTheme() { library.setReaderTheme(state.readerTheme === 'dark' ? 'light' : 'dark') }
+  useLayoutEffect(() => initializeTheme(state.readerTheme), [])
   async function submitCourse(event: FormEvent) {
     event.preventDefault()
-    if (!courseTitle.trim()) { setCourseError('Введите название курса.'); return }
-    if (courses.some(c => c.title.toLocaleLowerCase() === courseTitle.trim().toLocaleLowerCase())) { setCourseError('Курс с таким названием уже есть в этом пространстве.'); return }
+    if (!courseTitle.trim()) { setCourseError('Введите название категории.'); return }
+    if (categoryBusy) return
+    if (!folderParent && courses.some(c => c.ownerId === session.user?.id && c.title.toLocaleLowerCase() === courseTitle.trim().toLocaleLowerCase())) {
+      setCourseError('Категория с таким названием уже существует.')
+      return
+    }
+    setCategoryBusy(true)
     try {
-      const id = await library.createCourse(courseTitle, space)
+      const id = folderParent?.root.id ?? await library.createCourse(courseTitle, 'personal')
+      const path = folderParent ? await library.createFolder(id, folderParent.path, courseTitle.trim()) : ''
+      if (!library.getSnapshot().expandedCourses.includes(id)) library.toggleCourse(id)
       if (createAndStart && newIntent === 'manual') {
-        const note = await library.createNote(id); setCourseDialog(false); navigate(`/notes/${note.id}/edit`)
-      } else { setCourseDialog(false); navigate(createAndStart ? `/new?course=${id}` : `/courses/${id}`) }
+        try {
+          const note = await library.createNote(id, path)
+          navigate(`/notes/${note.id}/edit`)
+        } catch (error) {
+          setNewCourseId([id, path].filter(Boolean).join('/'))
+          setNewError((error as Error).message)
+          setCourseDialog(false)
+          setNewDialog(true)
+          return
+        }
+      } else if (createAndStart) {
+        navigate('/new?' + new URLSearchParams({course: id, folder: path}))
+      } else {
+        navigate(folderLink(id,path))
+      }
+      setSearch('')
+      setCourseDialog(false)
     } catch (error) { setCourseError((error as Error).message) }
+    finally { setCategoryBusy(false) }
+  }
+
+  function manageCategory(root: Course, path: string, action: CategoryAction) {
+    setMobileNav(false)
+    setCourseError('')
+    setCourseTitle(path.split('/').at(-1) || root.title)
+    setCategoryChange({root,path,action})
+  }
+  async function submitCategoryChange(event: FormEvent) {
+    event.preventDefault()
+    if (!categoryChange || categoryBusy) return
+    const {root,path,action} = categoryChange
+    setCategoryBusy(true)
+    try {
+      if (action === 'delete') {
+        await library.deleteCourse(root.id)
+        if (activeCourse?.id === root.id) navigate('/', {replace:true})
+      } else {
+        const nextPath = await library.reorganizeCategory(root.id, path, action, courseTitle.trim())
+        if (!activeNote && activeCourse?.id === root.id && (activePath === path || activePath.startsWith(path + '/'))) {
+          navigate(folderLink(root.id, [nextPath, activePath.slice(path.length).replace(/^\//,'')].filter(Boolean).join('/')), {replace:true})
+        }
+      }
+      setCategoryChange(null)
+    } catch (error) { setCourseError((error as Error).message) }
+    finally { setCategoryBusy(false) }
   }
 
   const sidebar = <>
-    <Link className="brand" to={basePath || '/'} aria-label="LectureVault — главная" onClick={() => setSearch('')}><BookOpenText size={20} strokeWidth={1.6} /><span>LectureVault</span></Link>
-    <div className="space-picker"><span aria-hidden="true">{space === 'personal' ? <House size={15} /> : <Users size={15} />}</span><select aria-label="Пространство" value={space} onChange={e => switchSpace(e.target.value as Workspace)}><option value="personal">Личное пространство</option><option value="shared">Общее пространство</option></select><ChevronDown size={13} className="select-chevron" /></div>
-    <label className="search-box"><Search size={15} /><input aria-label="Поиск по библиотеке" placeholder="Поиск" value={search} onChange={e => { setSearch(e.target.value); if (location.pathname !== (basePath || '/')) { navigate(basePath || '/') } }} />{search && <button className="clear-search" aria-label="Очистить поиск" onClick={() => setSearch('')}><X size={14} /></button>}</label>
-    <nav className="main-nav mobile-primary-nav" aria-label="Мобильная навигация"><NavLink to={basePath || '/'} end><BookOpen size={16} />Библиотека</NavLink>{<button className="mobile-new" onClick={() => startNew()}><Plus size={16} />Новый</button>}{<NavLink to="/queue"><ListOrdered size={16} />Очередь заданий{activeJobs.length > 0 && <span className="nav-count">{activeJobs.length}</span>}</NavLink>}</nav>
-    <div className="explorer-header"><span>Курсы</span>{<button className="icon-action" aria-label="Создать курс" title="Создать курс" onClick={() => openCourseDialog()}><Plus size={16} /></button>}</div>
-    <nav className="explorer" aria-label="Курсы и конспекты">
-      {!courses.length && <p className="tree-empty">Нет курсов</p>}
-      {courses.filter(c => !search || c.title.toLowerCase().includes(search.toLowerCase()) || state.notes.some(n => n.courseId === c.id && n.title.toLowerCase().includes(search.toLowerCase()))).map(course => {
+    <div className="navigator-heading"><Link className="brand" to={basePath || '/'} aria-label="LectureVault — главная" onClick={() => setSearch('')}><Brand/></Link><button className="icon-action close-explorer" aria-label="Скрыть проводник" title="Скрыть проводник" aria-controls="course-navigator" aria-expanded="true" onClick={() => toggleNavigator(true)}><PanelLeftClose size={16}/></button></div>
+    <nav className="main-nav library-nav" aria-label="Разделы библиотеки"><NavLink to={basePath || '/'} end><BookOpen size={16} />Библиотека</NavLink>{<button className="mobile-new" onClick={() => startNew()}><Plus size={16} />Добавить заметку</button>}{<NavLink to="/queue"><ListOrdered size={16} />Очередь заданий{activeJobs.length > 0 && <span className="nav-count">{activeJobs.length}</span>}</NavLink>}</nav>
+    <label className="search-box"><Search size={15} /><input aria-label="Поиск по библиотеке" placeholder="Найти категорию или заметку" value={search} onChange={e => { setSearch(e.target.value); if (location.pathname !== (basePath || '/')) { navigate(basePath || '/') } }} />{search && <button className="clear-search" aria-label="Очистить поиск" onClick={() => setSearch('')}><X size={14} /></button>}</label>
+    <div className="explorer-header"><span>Категории</span>{<button className="icon-action" aria-label="Создать категорию" title="Создать категорию" onClick={() => openCourseDialog()}><Plus size={16} /></button>}</div>
+    <nav className="explorer" aria-label="Категории и конспекты">
+      {courses.filter(c => !search || c.title.toLowerCase().includes(search.toLowerCase()) || c.folders?.some(p => p.toLowerCase().includes(search.toLowerCase())) || state.notes.some(n => n.courseId === c.id && `${n.title} ${n.category || ''}`.toLowerCase().includes(search.toLowerCase()))).map(course => {
         const expanded = state.expandedCourses.includes(course.id) || Boolean(search)
-        const notes = state.notes.filter(n => n.courseId === course.id && (!search || n.title.toLowerCase().includes(search.toLowerCase()) || course.title.toLowerCase().includes(search.toLowerCase())))
-        return <div className="course-tree" key={course.id}><div className={`course-tree-row ${activeCourse?.id === course.id && !activeNote ? 'is-current' : ''}`}><button className="tree-toggle" aria-label={`${expanded ? 'Свернуть' : 'Развернуть'} курс ${course.title}`} aria-expanded={expanded} onClick={() => toggleCourse(course.id)}>{expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</button><Link to={`${basePath}/courses/${course.id}`} className="course-tree-link" title={course.title}>{expanded ? <FolderOpen size={14} /> : <Folder size={14} />}<span>{course.title}</span></Link>{course.role !== 'viewer' && <button className="tree-add icon-action" aria-label={`Новый в курсе ${course.title}`} onClick={() => startNew(course.id)}><Plus size={14} /></button>}</div>{expanded && <div className="tree-children">{!notes.length ? <span className="tree-empty-note">Нет конспектов</span> : notes.map(note => <NavLink key={note.id} to={`${basePath}/notes/${note.id}`} title={note.title}><FileText size={13} /><span>{note.title}</span></NavLink>)}</div>}</div>
+        const notes = state.notes.filter(n => n.courseId === course.id && (!search || `${n.title} ${n.category || ''}`.toLowerCase().includes(search.toLowerCase()) || course.title.toLowerCase().includes(search.toLowerCase())))
+        return <div className="course-tree" key={course.id}><div onContextMenu={event => { event.preventDefault(); openRowActions(event.currentTarget, {x:event.clientX, y:event.clientY}) }} onKeyDown={event => { if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); openRowActions(event.currentTarget) } }} className={`course-tree-row ${activeCourse?.id === course.id && !activeNote && !activePath ? 'is-current' : ''}`}><button className="tree-toggle" aria-label={`${expanded ? 'Свернуть' : 'Развернуть'} категорию ${course.title}`} aria-expanded={expanded} onClick={() => toggleCourse(course.id)}>{expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</button><Link to={`${basePath}/courses/${course.id}`} className="course-tree-link" title={course.title}><CourseIcon course={course} open={expanded}/><span>{course.title}</span></Link><CategoryMenu course={course} manage={manageCategory} label={`Действия: ${course.title}`}><Button size="sm" variant="ghost" onClick={() => { setMobileNav(false); navigate(`/courses/${course.id}`) }}>Открыть категорию</Button>{course.role !== 'viewer' && <Button size="sm" variant="ghost" onClick={() => startNew(course.id,'')}>Добавить заметку</Button>}{course.role !== 'viewer' && <Button size="sm" variant="ghost" onClick={() => addFolder(course,'')}>Создать подкатегорию</Button>}</CategoryMenu></div>{expanded && <div className="tree-children"><NoteBranches notes={notes} course={course} search={search} selected={activeCourse?.id === course.id ? activePath : ''} manage={manageCategory} addFolder={addFolder} startNew={startNew}/></div>}</div>
       })}
     </nav>
-    <div className="sidebar-bottom">{<><ProviderConnections account />{library.hasLegacy() && !imported && <button className="help-link" onClick={() => { void library.importLocal().then(() => setImported(true)).catch(library.reportError) }}>Импортировать локальные курсы и заметки</button>}{imported && <p className="field-hint" role="status">Импортировано. Исходная копия в браузере сохранена.</p>}</>}<button className="help-link mobile-only" onClick={() => { setMobileNav(false); setHelp(true) }}><HelpCircle size={15} />Как это работает</button></div>
+    <div className="sidebar-bottom">{<><div className="account-tools"><ProviderConnections account /><ThemeButton /></div>{library.hasLegacy() && !imported && <button className="help-link" onClick={() => { void library.importLocal().then(() => setImported(true)).catch(library.reportError) }}>Импортировать локальные категории и заметки</button>}{imported && <p className="field-hint" role="status">Импортировано. Исходная копия в браузере сохранена.</p>}</>}</div>
   </>
 
   return <>
     <a href="#main-content" className="skip-link">К содержимому</a>
     <div className="page app-layout"><div id="quartz-body" className={`workspace-layout ${hasContext ? 'with-context' : ''} ${navCollapsed ? 'nav-collapsed' : ''}`}>
-      <ActivityRail basePath={basePath} queueCount={activeJobs.length} section={isNew ? 'create' : isQueue ? 'queue' : isSettings ? 'settings' : 'library'} onCreate={() => startNew()} onSearch={focusSearch} onHelp={() => setHelp(true)} />
-      <aside className="sidebar left desktop-sidebar">{sidebar}</aside>
-      <main className={`center main-content ${activeNote ? `reader-page reader-${state.readerTheme}` : ''}`} id="main-content">
-        <WorkspaceHeader collapsed={navCollapsed} onToggleNavigation={() => setNavCollapsed(!navCollapsed)} label={activeNote ? `${activeNote.title}.md` : isNew ? 'Сгенерировать конспект' : isQueue ? 'Очередь заданий' : isSettings ? 'Настройки' : activeCourse?.title ?? 'Библиотека'} mode={activeNote ? isEditing ? 'Редактирование' : 'Чтение' : ''} onOpenNavigation={() => setMobileNav(true)} breadcrumbs={<><Link to={basePath || '/'}>{spaceLabel(space)}</Link>{activeCourse && <><ChevronRight size={12} />{activeNote ? <Link to={`${basePath}/courses/${activeCourse.id}`}>{activeCourse.title}</Link> : <span>{activeCourse.title}</span>}</>}{!activeCourse && (isNew || isQueue || isSettings) && <><ChevronRight size={12} /><span>{isNew ? 'Новый конспект' : isSettings ? 'Настройки' : 'Очередь заданий'}</span></>}</>} actions={activeNote && !isEditing ? <ReaderActions note={activeNote} contextAvailable={Boolean(activeNote.jobId || /^#{2,4}\s/m.test(activeNote.markdown))} onEdit={activeCourse?.role !== 'viewer' ? () => navigate(`/notes/${activeNote.id}/edit`) : undefined} onDelete={activeCourse?.role !== 'viewer' ? () => { if (window.confirm('Удалить эту заметку? Это действие нельзя отменить.')) void library.deleteNote(activeNote.id).then(() => navigate(`/courses/${activeNote.courseId}`)).catch(library.reportError) } : undefined} theme={state.readerTheme} onToggleTheme={toggleTheme} contextOpen={contextOpen} onToggleContext={() => setContextOpen(!contextOpen)} /> : undefined} />
+      <ActivityRail basePath={basePath} queueCount={activeJobs.length} section={isNew ? 'create' : isQueue ? 'queue' : isSettings ? 'settings' : 'library'} onCreate={() => startNew()} onSearch={focusSearch} onExpand={() => toggleNavigator(false)} />
+      <aside id="course-navigator" className="sidebar left desktop-sidebar">{sidebar}</aside>
+      <main className={`center main-content ${activeNote ? 'reader-page' : activeCourse ? 'category-page' : 'section-page'}`} id="main-content">
+        <WorkspaceHeader label={activeNote ? `${activeNote.title}.md` : isNew ? 'Сгенерировать конспект' : isQueue ? 'Очередь заданий' : isSettings ? 'Настройки' : (activePath.split('/').at(-1) || activeCourse?.title) ?? 'Библиотека'} mode={activeNote ? isEditing ? 'Редактирование' : 'Чтение' : ''} onOpenNavigation={() => setMobileNav(true)} breadcrumbs={isQueue || isSettings ? <span className="global-location">LectureVault</span> : <><Link to={basePath || '/'}>Библиотека</Link>{activeCourse && <><ChevronRight size={12} />{activeNote || activePath ? <Link to={folderLink(activeCourse.id)}>{activeCourse.title}</Link> : <span aria-current="page" title={activeCourse.title}>{activeCourse.title}</span>}
+          {activePath.split('/').filter(Boolean).map((name,i,parts) => <Fragment key={i}><ChevronRight size={12}/>{!activeNote && i === parts.length - 1 ? <span aria-current="page" title={name}>{name}</span> : <Link title={name} to={folderLink(activeCourse.id,parts.slice(0,i+1).join('/'))}>{name}</Link>}</Fragment>)}</>}{!activeCourse && (isNew || isQueue || isSettings) && <><ChevronRight size={12} /><span>{isNew ? 'Новый конспект' : isSettings ? 'Настройки' : 'Очередь заданий'}</span></>}</>} actions={activeNote && !isEditing ? <ReaderActions note={activeNote} contextAvailable={hasReaderContext} onEdit={activeCourse?.role !== 'viewer' ? () => navigate(`/notes/${activeNote.id}/edit`) : undefined} onDelete={activeCourse?.role !== 'viewer' ? () => { if (window.confirm('Удалить эту заметку? Это действие нельзя отменить.')) void library.deleteNote(activeNote.id).then(() => navigate(folderLink(activeNote.courseId, activeNote.category))).catch(library.reportError) } : undefined} contextOpen={contextOpen} onToggleContext={() => setContextOpen(!contextOpen)} /> : undefined} />
         {library.getError() && <div className="storage-error" role="alert">{library.getError()}</div>}
         <div className="content-body">
           <Routes>
-            <Route path="/" element={<LibraryPage state={state} courses={courses} search={search} createCourse={() => openCourseDialog()} startNew={startNew} />} />
-            <Route path="/courses/:id" element={<CoursePage state={state} startNew={startNew} />} />
+            <Route path="/invite" element={<Invitation />} />
+            <Route path="/" element={<LibraryPage manage={manageCategory} addFolder={addFolder} state={state} courses={courses} search={search} createCourse={() => openCourseDialog()} startNew={startNew} />} />
+            <Route path="/courses/:id" element={<CoursePage manage={manageCategory} state={state} startNew={startNew} addFolder={addFolder} />} />
             <Route path="/new" element={<CreateNotePage draftRef={generationDraft} state={state} createCourse={() => { setNewIntent('generate'); openCourseDialog(true) }} />} />
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/queue" element={<QueuePage state={state} startNew={() => startNew()} />} />
+            <Route path="/queue" element={<QueuePage state={state} startNew={() => navigate('/new')} />} />
             <Route path="/notes/:id/edit" element={activeNote && activeNote.contentLoaded === false ? <p role="status">Открываем заметку…</p> : activeNote ? <Suspense fallback={<p role="status">Открываем редактор…</p>}><NoteEditor key={activeNote.id} note={activeNote} canEdit={activeCourse?.role !== 'viewer'} /></Suspense> : <NotFound />} />
-            <Route path="/notes/:id" element={<ReaderPage state={state} />} />
+            <Route path="/notes/:id" element={<ReaderPage state={state} entries={entries} onOutline={updateOutline} />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </div>
       </main>
-      {hasContext && <aside className="sidebar right context-sidebar">{activeNote ? <ReaderInspector key={activeNote.id} markdown={activeNote.markdown} source={state.jobs.some(j => j.id === activeNote.jobId) ? <SourceDetails note={activeNote} state={state} /> : null} /> : <JobSteps job={selectedJob} />}</aside>}
+      {hasContext && <aside className="sidebar right context-sidebar"><ReaderInspector key={activeNote.id} entries={entries} source={hasSource ? <SourceDetails note={activeNote} state={state} /> : null} /></aside>}
     </div></div>
-    <Dialog open={newDialog} onOpenChange={setNewDialog} title="Новый" description="Создать заметку вручную или получить конспект из видео"><div className="new-menu">{courses.some(c => c.role !== 'viewer') && <><label className="field-label" htmlFor="new-course">Курс</label><select id="new-course" value={newCourseId} onChange={e => setNewCourseId(e.target.value)}>{courses.filter(c => c.role !== 'viewer').map(c => <option key={c.id} value={c.id}>{c.title}</option>)}</select></>}<Button variant="outline" disabled={creating} onClick={() => void chooseNew('manual')}><FileText size={17} />Создать заметку</Button><Button variant="outline" disabled={creating} onClick={() => void chooseNew('generate')}><Upload size={17} />Сгенерировать конспект</Button>{!courses.some(c => c.role !== 'viewer') && <p className="field-hint">Сначала предложим создать курс.</p>}{newError && <p className="field-error" role="alert">{newError}</p>}</div></Dialog>
-    <Dialog open={mobileNav} onOpenChange={setMobileNav} title="Навигация" description="Пространства, курсы и конспекты" className="mobile-sidebar-dialog"><div className="mobile-sidebar-content" onClick={event => { if ((event.target as HTMLElement).closest('a[href]')) setMobileNav(false) }}>{sidebar}</div></Dialog>
-    <Dialog open={courseDialog} onOpenChange={setCourseDialog} title={courses.length ? 'Новый курс' : 'Первый курс'} description={spaceLabel(space)}><form onSubmit={submitCourse} className="course-form"><label className="field-label" htmlFor="course-title">Название курса</label><input id="course-title" autoFocus maxLength={80} placeholder="Например, Распределённые системы" value={courseTitle} onChange={e => { setCourseTitle(e.target.value); setCourseError('') }} aria-invalid={!!courseError} aria-describedby={courseError ? 'course-error' : undefined} />{courseError && <p id="course-error" className="field-error" role="alert">{courseError}</p>}<div className="dialog-actions"><Button type="button" variant="ghost" onClick={() => setCourseDialog(false)}>Отмена</Button><Button type="submit">Создать курс</Button></div></form></Dialog>
-    <Dialog open={help} onOpenChange={setHelp} title="Как это работает" description="Заметки и конспекты"><div className="help-content"><ol><li>Создайте курс.</li><li>Выберите ручную заметку или генерацию из видео.</li><li>Дождитесь завершения задания в очереди.</li><li>Откройте конспект и скачайте Markdown.</li></ol><p>Для генерации подключите провайдера в настройках, затем загрузите видео и при необходимости PDF. Расшифровка и текст слайдов передаются выбранной модели. Ручные заметки не требуют подключения.</p><p>«Новый» также создаёт пустую заметку без генерации. Сохранённые документы хранятся на сервере; несохранённые черновики — в этом браузере. </p><Button variant="outline" onClick={() => setHelp(false)}>Понятно</Button></div></Dialog>
+    <Dialog open={newDialog} onOpenChange={setNewDialog} title="Добавить заметку" description=""><div className="new-menu">{courses.some(c => c.role !== 'viewer') && <><label className="field-label" htmlFor="new-course">Категория</label><select id="new-course" value={newCourseId} onChange={e => setNewCourseId(e.target.value)}><CategoryOptions courses={courses.filter(c => c.role !== 'viewer')}/></select></>}<Button variant="outline" disabled={creating} onClick={() => void chooseNew('manual')}><FileText size={17} />Создать заметку</Button><Button variant="outline" disabled={creating} onClick={() => void chooseNew('generate')}><Upload size={17} />Сгенерировать конспект</Button>{!courses.some(c => c.role !== 'viewer') && <p className="field-hint">Для первой заметки понадобится категория.</p>}{newError && <p className="field-error" role="alert">{newError}</p>}</div></Dialog>
+    <Dialog open={mobileNav} onOpenChange={setMobileNav} title="Навигация" description="" className="mobile-sidebar-dialog"><div className="mobile-sidebar-content" onClick={event => { if ((event.target as HTMLElement).closest('a[href]')) setMobileNav(false) }}>{sidebar}</div></Dialog>
+    <Dialog open={courseDialog} onOpenChange={open => { if (!categoryBusy) setCourseDialog(open) }} title={folderParent ? 'Новая подкатегория' : 'Новая категория'} description="">
+      <form onSubmit={submitCourse} className="course-form">
+        <label className="field-label" htmlFor="course-title">Название категории</label>
+        <input id="course-title" autoFocus maxLength={folderParent ? 60 : 80} placeholder="Название" value={courseTitle} onChange={e => {setCourseTitle(e.target.value); setCourseError('')}} aria-invalid={!!courseError}/>
+        {courses.some(c => c.role !== 'viewer') && <>
+          <label className="field-label" htmlFor="category-parent">Родительская категория</label>
+          <select id="category-parent" value={folderParent ? [folderParent.root.id,folderParent.path].filter(Boolean).join('/') : ''} onChange={e => {
+            const [id,...parts] = e.target.value.split('/')
+            const root = courses.find(c => c.id === id)
+            setFolderParent(root ? {root,path:parts.join('/')} : null)
+            setCourseError('')
+          }}><option value="">Без родителя — в библиотеке</option><CategoryOptions courses={courses.filter(c => c.role !== 'viewer')} parentsOnly/></select>
+        </>}
+        <p className="field-hint">{folderParent ? 'Доступ наследуется от родительской категории.' : 'Категория доступна только вам. Пригласить участников можно после создания.'}</p>
+        {courseError && <p className="field-error" role="alert">{courseError}</p>}
+        <div className="dialog-actions"><Button type="button" variant="ghost" disabled={categoryBusy} onClick={() => setCourseDialog(false)}>Отмена</Button><Button type="submit" disabled={categoryBusy}>{folderParent ? 'Создать подкатегорию' : 'Создать категорию'}</Button></div>
+      </form>
+    </Dialog>
+    <Dialog open={!!categoryChange} onOpenChange={open => { if (!open && !categoryBusy) setCategoryChange(null) }}
+      className="category-change-dialog" title={categoryChange?.action === 'rename' ? 'Переименовать категорию' : categoryChange?.action === 'delete' ? 'Удалить категорию?' : 'Объединить с родителем?'} description="">
+      {categoryChange && <form className="course-form" onSubmit={submitCategoryChange}>
+        {categoryChange.action === 'rename' ? <>
+          <label className="field-label" htmlFor="rename-folder">Название категории</label>
+          <input id="rename-folder" autoFocus value={courseTitle} maxLength={categoryChange.path ? 60 : 80}
+            onChange={e => {setCourseTitle(e.target.value); setCourseError('')}} required/>
+        </> : <p>{categoryChange.action === 'delete'
+          ? <>Категория <strong>«{categoryChange.root.title}»</strong>, её заметки, подкатегории и материалы будут удалены.</>
+          : <>Заметки и подкатегории из <strong>«{categoryChange.path.split('/').at(-1)}»</strong> перейдут в <strong>«{categoryChange.path.split('/').at(-2) || categoryChange.root.title}»</strong>. Пустая папка исчезнет.</>}</p>}
+        {courseError && <p className="field-error" role="alert">{courseError}</p>}
+        <div className="dialog-actions"><Button variant="ghost" type="button" disabled={categoryBusy} onClick={() => setCategoryChange(null)}>Отмена</Button><Button disabled={categoryBusy || (categoryChange.action === 'rename' && !courseTitle.trim())} type="submit">{categoryChange.action === 'rename' ? 'Сохранить' : categoryChange.action === 'delete' ? 'Удалить категорию' : 'Объединить'}</Button></div>
+      </form>}
+    </Dialog>
   </>
 }
 
-function LibraryPage({ state, courses, search, createCourse, startNew, basePath = '' }: { state: AppState; courses: Course[]; search: string; createCourse?: () => void; startNew?: (id?: string) => void; basePath?: string }) {
-  const notes = state.notes.filter(n => courses.some(c => c.id === n.courseId))
-  const hits = notes.filter(n => n.title.toLowerCase().includes(search.toLowerCase()) || courses.find(c => c.id === n.courseId)?.title.toLowerCase().includes(search.toLowerCase()))
-  if (search) return <><PageHeading title="Результаты поиска" description={`«${search}» · ${plural(hits.length, ['конспект', 'конспекта', 'конспектов'])}`} /><NoteTable notes={hits} courses={courses} basePath={basePath} />{!hits.length && <div className="quiet-empty"><p>Ничего не найдено. Попробуйте другое название.</p></div>}</>
-  return <>
-    <PageHeading title="Библиотека" description={courses.length ? `${plural(courses.length, ['курс', 'курса', 'курсов'])} · ${plural(notes.length, ['конспект', 'конспекта', 'конспектов'])}${basePath ? ' · демонстрационные материалы' : ''}` : undefined} action={courses.length > 0 && createCourse && <Button variant="outline" size="sm" onClick={createCourse}><Plus size={14} />Создать курс</Button>} />
-    {!courses.length ? <div className="library-empty"><Folder size={20} strokeWidth={1.5} /><div><h2>Нет курсов</h2><p>Создайте курс для заметок и конспектов.</p><Button size="sm" onClick={createCourse}><Plus size={15} />Создать курс</Button></div></div> : <><div className="section-heading"><h2>Курсы</h2></div><div className="course-list">{courses.map(course => <div className="course-list-row" key={course.id}><Link to={`${basePath}/courses/${course.id}`} className="course-list-main"><Folder size={17} strokeWidth={1.5} /><strong>{course.title}</strong><span className="course-note-count">{plural(notes.filter(n => n.courseId === course.id).length, ['конспект', 'конспекта', 'конспектов'])}</span><ChevronRight size={14} className="row-chevron" /></Link>{startNew && course.role !== 'viewer' && <button className="icon-action" aria-label={`Добавить конспект в ${course.title}`} onClick={() => startNew(course.id)}><Plus size={16} /></button>}</div>)}</div>{notes.length > 0 && <><div className="section-heading recent-heading"><h2>Конспекты</h2><span>По дате добавления</span></div><NoteTable notes={notes.slice().sort((a,b) => b.createdAt - a.createdAt)} courses={courses} basePath={basePath} /></>}</>}
-  </>
+function LibraryPage({ state, courses, search, createCourse, startNew, addFolder, manage, basePath = '' }: { state: AppState; courses: Course[]; search: string; createCourse: () => void; startNew: (id?: string, path?: string) => void; addFolder: (root: Course,path: string) => void; manage: (root: Course,path: string,action: CategoryAction) => void; basePath?: string }) {
+  const [params] = useSearchParams()
+  const allNotes = params.get('view') === 'recent'
+  const notes = state.notes
+  const categoryCount = courses.reduce((count, root) => count + 1 + (root.folders?.length ?? 0), 0)
+  if (search) {
+    const query = search.toLocaleLowerCase()
+    const categories = courses.flatMap(root => ['', ...(root.folders ?? [])]
+      .filter(path => (path || root.title).toLocaleLowerCase().includes(query))
+      .map(path => ({ root, path })))
+    const hits = notes.filter(note => [note.title, note.category, courses.find(root => root.id === note.courseId)?.title]
+      .join(' ').toLocaleLowerCase().includes(query))
+    return <div className="library-sheet">
+      <PageHeading title="Результаты поиска" description={`«${search}»`}/>
+      <div className="library-index">
+        {categories.length > 0 && <section><div className="section-heading"><h2>Категории</h2></div>
+          {categories.map(({root, path}) => <Link className="category-result" key={root.id + '/' + path} to={folderLink(root.id,path)}>
+            <span className="folder-symbol"><CourseIcon course={root} path={path}/></span>
+            {[root.title, ...path.split('/').filter(Boolean)].join(' › ')}
+          </Link>)}
+        </section>}
+        {hits.length > 0 && <section><div className="section-heading"><h2>Заметки</h2></div><NoteTable notes={hits} courses={courses} basePath={basePath}/></section>}
+        {!categories.length && !hits.length && <p className="field-hint">Ничего не найдено. Попробуйте другое название.</p>}
+      </div>
+    </div>
+  }
+  const recent = [...notes].sort((a,b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt))
+  if (allNotes) return <div className="library-sheet">
+    <Link className="library-back" to={basePath || '/'}><ArrowLeft size={15}/>Библиотека</Link>
+    <PageHeading title="Все заметки"/>
+    {recent.length ? <NoteTable notes={recent} courses={courses} basePath={basePath}/> : <p className="field-hint">Заметок пока нет.</p>}
+  </div>
+  return <div className="library-sheet">
+    <PageHeading title="Библиотека" description={courses.length ? `${plural(categoryCount, ['категория', 'категории', 'категорий'])} · ${plural(notes.length, ['заметка', 'заметки', 'заметок'])}` : undefined} action={courses.length > 0 && <div className="page-actions"><Button variant="outline" size="sm" onClick={createCourse}>Создать категорию</Button>{courses.some(c => c.role !== 'viewer') && <Button size="sm" onClick={() => startNew()}><Plus size={14}/>Добавить заметку</Button>}</div>} />
+    {!courses.length ? <div className="library-empty"><span className="folder-symbol"><Folder size={22}/></span><div><h2>Нет категорий</h2><Button size="sm" onClick={createCourse}><Plus size={15} />Создать категорию</Button></div></div> : <div className="library-index">
+      <section className="library-courses" aria-labelledby="catalog-heading">
+        <div className="section-heading"><h2 id="catalog-heading">Категории</h2></div>
+        <div className="course-list">{courses.map(root => {
+          const materials = notes.filter(n => n.courseId === root.id)
+          const children = childFolders(root, '')
+          return <DirectoryRow key={root.id} course={root} count={materials.length} manage={manage} addFolder={addFolder} startNew={startNew}>
+            {children.length > 0 && <div className="directory-children">{children.slice(0,3).map(path =>
+              <Link key={path} to={folderLink(root.id,path)}><CourseIcon course={root} path={path}/>{path}</Link>)}
+              {children.length > 3 && <Link to={folderLink(root.id)}>Ещё {children.length-3}</Link>}
+            </div>}
+          </DirectoryRow>
+        })}</div>
+      </section>
+      {recent.length > 0 && <section className="library-recent" aria-labelledby="recent-heading">
+        <div className="section-heading"><h2 id="recent-heading">Недавние заметки</h2><Link className="library-more" to="?view=recent">Все заметки<ArrowRight size={14}/></Link></div>
+        <NoteTable notes={recent.slice(0,6)} courses={courses} basePath={basePath}/>
+      </section>}
+    </div>}
+  </div>
 }
 
-function NoteTable({ notes, courses, basePath = '' }: { notes: Note[]; courses?: Course[]; basePath?: string }) {
-  return <div className={`note-list ${courses ? '' : 'without-course'}`} role="table" aria-label="Конспекты"><div className="note-table-head" role="row"><span role="columnheader">Название</span>{courses && <span role="columnheader">Курс</span>}<span role="columnheader">Добавлен</span></div>{notes.map(note => <Link className="note-list-row" role="row" key={note.id} to={`${basePath}/notes/${note.id}`}><span className="note-name" role="cell"><FileText size={16} strokeWidth={1.5} /><strong title={note.title}>{note.title}</strong></span>{courses && <span className="note-course" role="cell">{courses.find(c => c.id === note.courseId)?.title}</span>}<time role="cell" dateTime={new Date(note.createdAt).toISOString()}>{formatDate(note.createdAt)}</time></Link>)}</div>
+function NoteTable({ notes, courses, course, basePath = '' }: { notes: Note[]; courses?: Course[]; course?: Course; basePath?: string }) {
+  return <div className={`note-list ${courses ? '' : 'without-course'}`} role="table" aria-label="Конспекты">
+    <div className="note-table-head" role="row"><span role="columnheader">Название</span>{courses && <span role="columnheader">Категория</span>}<span role="columnheader">Изменено</span><span className="sr-only" role="columnheader">Действия</span></div>
+    {notes.map(note => {
+      const parent = course ?? courses?.find(item => item.id === note.courseId)
+      if (!parent) return null
+      const changed = note.updatedAt ?? note.createdAt
+      return <NoteActions key={note.id} tableRow note={note} course={parent} paths={parent.folders ?? []}>
+        <span role="cell"><Link className="note-name" aria-label={note.title} to={`${basePath}/notes/${note.id}`}>
+          <FileText size={16}/><span><strong title={note.title}>{note.title}</strong>{courses && note.category && <small>{note.category.split('/').join(' / ')}</small>}</span>
+        </Link></span>
+        {courses && <span className="note-course" role="cell">{parent.title}</span>}
+        <time role="cell" dateTime={new Date(changed).toISOString()}>{formatDate(changed)}</time>
+      </NoteActions>
+    })}
+  </div>
 }
 
-function CoursePage({ state, startNew, basePath = '' }: { state: AppState; startNew?: (id?: string) => void; basePath?: string }) {
+function CoursePage({ state, startNew, addFolder, manage }: {
+  state: AppState; manage: (root: Course,path: string,action: CategoryAction) => void; startNew: (id: string,path: string) => void; addFolder: (course: Course,path: string) => void
+}) {
   const { id } = useParams()
-  const navigate = useNavigate()
+  const [params] = useSearchParams()
   const course = state.courses.find(c => c.id === id)
-  if (!course) return <NotFound />
-  const notes = state.notes.filter(n => n.courseId === id)
-  const pending = state.jobs.filter(j => j.courseId === id && (j.status === 'queued' || isActive(j)))
-  return <><PageHeading title={course.title} description={`${plural(notes.length, ['конспект', 'конспекта', 'конспектов'])} · ${basePath ? 'Демонстрационные материалы' : spaceLabel(course.workspace)}`} action={<div className="page-actions">{course.role === 'owner' && <ActionMenu label="Действия курса"><Button size="sm" variant="ghost" className="danger-action" onClick={() => { if (window.confirm('Удалить курс со всеми заметками и материалами? Это действие нельзя отменить.')) void library.deleteCourse(course.id).then(() => navigate('/')).catch(library.reportError) }}>Удалить курс</Button></ActionMenu>}{!basePath && course.workspace === 'shared' && <CourseMembers course={course} />}{startNew && course.role !== 'viewer' && <Button size="sm" onClick={() => startNew(course.id)}><Plus size={15} />Новый</Button>}</div>} />{pending.length > 0 && <Link to="/queue" className="pending-notice"><LoaderCircle size={16} className="spin" />{plural(pending.length, ['задание', 'задания', 'заданий'])} в обработке<ArrowRight size={15} /></Link>}{notes.length ? <NoteTable notes={notes.slice().reverse()} basePath={basePath} /> : <div className="quiet-empty course-empty"><p>В курсе пока нет заметок.</p>{startNew && course.role !== 'viewer' && <Button variant="outline" size="sm" onClick={() => startNew(course.id)}>Новый<Plus size={15} /></Button>}</div>}</>
+  const path = params.get('folder') || ''
+  if (!course || (path && !course.folders?.includes(path))) return <NotFound/>
+  const folders = childFolders(course, path)
+  const notes = state.notes.filter(n => n.courseId === id && (n.category || '') === path)
+  const pending = state.jobs.filter(j => j.courseId === id && (j.category || '') === path && (j.status === 'queued' || isActive(j)))
+  const writable = course.role !== 'viewer'
+  const title = path.split('/').at(-1) || course.title
+  return <div className="library-sheet">
+    <header className="category-heading">
+      <div className="category-identity">
+        <span className="folder-symbol"><CourseIcon course={course} path={path}/></span>
+        <div><h1>{title}</h1>{course.role === 'owner' && <IconPicker course={course} path={path}/>}</div>
+      </div>
+      <div className="category-tools">
+        {writable && <><Button size="sm" onClick={() => startNew(course.id,path)}><Plus size={15}/>Добавить заметку</Button>
+          {path.split('/').length < 6 && <Button variant="outline" size="sm" onClick={() => addFolder(course,path)}>Создать подкатегорию</Button>}</>}
+        <CourseMembers key={course.id} course={course} inherited={!!path}/>
+        {course.role === 'owner' && <CategoryMenu label="Действия категории" course={course} path={path} manage={manage}/>}
+      </div>
+    </header>
+    {pending.length > 0 && <Link to="/queue" className="pending-notice"><LoaderCircle size={16} className="spin"/>{plural(pending.length,['задание','задания','заданий'])} в работе<ArrowRight size={15}/></Link>}
+    <div className="library-index">
+      {folders.length > 0 && <section><div className="section-heading"><h2>Подкатегории</h2></div>
+        {folders.map(child => <DirectoryRow key={child} course={course} path={child} startNew={startNew} addFolder={addFolder} manage={manage}
+          count={state.notes.filter(n => n.courseId === id && (n.category === child || n.category?.startsWith(child + '/'))).length}/>)}
+      </section>}
+      {notes.length > 0 && <section><div className="section-heading"><h2>Заметки</h2></div><NoteTable course={course} notes={notes.slice().reverse()}/></section>}
+      {!folders.length && !notes.length && <p className="category-empty">Категория пока пуста.</p>}
+    </div>
+  </div>
 }
 
 function Status({ job }: { job: Job }) {
   return <span className={`job-status status-${job.status}`}>{isActive(job) ? <LoaderCircle size={14} className="spin" /> : job.status === 'ready' ? <CheckCircle2 size={14} /> : job.status === 'failed' ? <XCircle size={14} /> : job.status === 'cancelled' ? <X size={13} /> : <Clock3 size={14} />}{STATUS_LABELS[job.status]}</span>
 }
 
+type QueueFilter = 'all' | 'active' | 'ready'
+function queueView(all: Job[], params: URLSearchParams) {
+  const raw = params.get('filter')
+  const filter: QueueFilter = raw === 'active' || raw === 'ready' ? raw : 'all'
+  const jobs = all.filter(j => filter === 'all' || (filter === 'ready' ? j.status === 'ready' : j.status === 'queued' || isActive(j))).slice().reverse()
+  const selectedJob = jobs.find(j => j.id === params.get('job')) ?? jobs.find(isActive) ?? jobs[0]
+  return { filter, jobs, selectedJob }
+}
+
 function QueuePage({ state, startNew }: { state: AppState; startNew: () => void }) {
   const [params, setParams] = useSearchParams()
+  const [overrides, setOverrides] = useState<Record<string, boolean>>({})
   const session = useSession()
-  const [filter, setFilter] = useState<'all' | 'active' | 'ready'>('all')
-  const jobs = state.jobs.filter(j => filter === 'all' || (filter === 'ready' ? j.status === 'ready' : j.status === 'queued' || isActive(j))).slice().reverse()
-  const selectedJob = state.jobs.find(j => j.id === params.get('job')) ?? state.jobs.find(isActive) ?? state.jobs.at(-1)
-  return <><PageHeading title="Очередь заданий" /><div className="queue-toolbar"><TabBar label="Фильтр заданий" panelId="queue-results" className="queue-tabs" value={filter} onValueChange={setFilter} items={(['all', 'active', 'ready'] as const).map(value => ({ value, label: <>{{ all: 'Все', active: 'В работе', ready: 'Готовые' }[value]}<span>{state.jobs.filter(j => value === 'all' || (value === 'ready' ? j.status === 'ready' : isActive(j) || j.status === 'queued')).length}</span></> }))} /><span className="queue-mode"><span className="demo-dot" />Последовательно</span></div><div aria-live="polite" className="sr-only">{selectedJob ? `${selectedJob.title}: ${STATUS_LABELS[selectedJob.status]}` : 'Очередь пуста'}</div>
-    <div id="queue-results" role="tabpanel" aria-labelledby={`queue-results-${filter}-tab`}>{!jobs.length ? <div className="quiet-empty"><ListOrdered size={20} strokeWidth={1.5} /><h2>{state.jobs.length ? 'Здесь пока нет заданий' : 'Очередь пуста'}</h2><p>{state.jobs.length ? 'Выберите другой фильтр или создайте новый конспект.' : 'Загрузите видео, чтобы создать задание.'}</p><Button variant="outline" onClick={startNew}>Новый конспект<Plus size={16} /></Button></div> : <div className="job-list">{jobs.map(job => <div className={`job-item ${job.id === selectedJob?.id ? 'selected' : ''}`} key={job.id}><div className={`job-file-icon ${job.status === 'ready' ? 'job-file-ready' : ''}`}>{job.status === 'ready' ? <FileText size={21} strokeWidth={1.4} /> : job.sourceType === 'url' ? <Link2 size={20} /> : <BookOpen size={21} strokeWidth={1.4} />}</div><div className="job-content"><button title={`${job.title} — источник: ${job.sourceName}`} className="job-title" onClick={() => setParams({ job: job.id })}>{job.title}</button><p>{state.courses.find(c => c.id === job.courseId)?.title} <span>·</span> {job.preset === 'lecture' ? 'Лекция' : 'Семинар'} <span>·</span> {LENGTH_LABELS[job.length]} <span>·</span> {job.mode === 'real' ? `Whisper + ${PROVIDER_NAMES[job.provider ?? 'codex']}` : 'Демо'}</p><Status job={job} />{job.error && <p className="job-error">{job.error}</p>}</div><div className="job-actions">{job.status === 'ready' && job.noteId && state.notes.some(note => note.id === job.noteId) && <Button asChild size="sm" variant="outline"><Link to={`/notes/${job.noteId}`}>Открыть<ArrowRight size={14} /></Link></Button>}{job.status === 'queued' && job.createdBy === session.user?.id && <Button size="sm" variant="ghost" onClick={() => void library.cancel(job.id).catch(library.reportError)}>Отменить</Button>}{job.status === 'failed' && job.createdBy === session.user?.id && state.courses.some(course => course.id === job.courseId && course.role !== 'viewer') && <Button size="sm" variant="outline" onClick={() => void library.retry(job.id).catch(library.reportError)}>Повторить</Button>}{job.status === 'ready' && !job.noteId && <span className="field-hint">Результат удалён</span>}</div></div>)}</div>}
-    </div><div className="queue-footnote"><Clock3 size={15} /><p>Обработка продолжается, когда вы переходите на другой экран. Ожидающее задание можно отменить, ошибку — повторить.</p></div>{selectedJob && <div className="mobile-context"><JobSteps job={selectedJob} /></div>}
+  const { filter, jobs, selectedJob } = queueView(state.jobs, params)
+  const setFilter = (value: QueueFilter) => setParams(value === 'all' ? {} : { filter: value })
+  return <><PageHeading title="Очередь заданий" />
+    <div className="queue-toolbar"><TabBar label="Фильтр заданий" panelId="queue-results" className="queue-tabs" value={filter} onValueChange={setFilter}
+      items={(['all', 'active', 'ready'] as const).map(value => ({value, label: <>{{all:'Все',active:'В работе',ready:'Готовые'}[value]}<span>{queueView(state.jobs, new URLSearchParams({filter:value})).jobs.length}</span></>}))}/></div>
+    <div id="queue-results" role="tabpanel" aria-labelledby={`queue-results-${filter}-tab`}>
+      {!jobs.length && <div className="quiet-empty"><h2>{state.jobs.length ? 'Заданий с этим статусом пока нет' : 'Очередь пуста'}</h2><Button variant="outline" onClick={startNew}>Новый конспект<Plus size={16}/></Button></div>}
+      <div className="job-list">{jobs.map(job => {
+        const expanded = overrides[job.id] ?? (isActive(job) || job.id === selectedJob?.id)
+        const toggle = () => setOverrides(current => ({...current, [job.id]: !expanded}))
+        return <Fragment key={job.id}><div className={`job-item ${expanded ? 'selected' : ''}`}>
+          <div className="job-content">
+            <button className="job-title" aria-expanded={expanded} aria-controls={'stages-' + job.id} onClick={toggle}><ChevronRight size={15}/>{job.title}</button>
+            <p>{[state.courses.find(c => c.id === job.courseId)?.title, job.category?.split('/').join(' › '), job.mode === 'real' ? [PROVIDER_NAMES[job.provider ?? 'codex'],job.model].filter(Boolean).join(' · ') : 'Демо'].filter(Boolean).join(' · ')}</p>
+            <Status job={job}/>{job.error && <p className="job-error">{job.error}</p>}
+          </div>
+          <div className="job-actions">
+            {job.status === 'ready' && job.noteId && state.notes.some(n => n.id === job.noteId) && <Button asChild size="sm" variant="outline"><Link to={`/notes/${job.noteId}`}>Открыть<ArrowRight size={14}/></Link></Button>}
+            {job.status === 'queued' && job.createdBy === session.user?.id && <Button size="sm" variant="ghost" onClick={() => void library.cancel(job.id).catch(library.reportError)}>Отменить</Button>}
+            {job.status === 'failed' && job.createdBy === session.user?.id && state.courses.some(c => c.id === job.courseId && c.role !== 'viewer') && <Button size="sm" variant="outline" onClick={() => void library.retry(job.id).catch(library.reportError)}>Повторить</Button>}
+            {job.status === 'ready' && !job.noteId && <span className="field-hint">Результат удалён</span>}
+          </div></div>
+          <div className="inline-job-steps" id={'stages-' + job.id} hidden={!expanded}>{expanded && <JobSteps job={job}/>}</div>
+        </Fragment>
+      })}</div>
+    </div>
   </>
 }
 
-function ReaderPage({ state, basePath = '' }: { state: AppState; basePath?: string }) {
+function ReaderPage({ state, entries, onOutline, basePath = '' }: { state: AppState; entries: TocEntry[]; onOutline: (entries: TocEntry[]) => void; basePath?: string }) {
   const { id } = useParams()
   const note = state.notes.find(n => n.id === id)
   const [mobileToc, setMobileToc] = useState(false)
@@ -235,22 +458,56 @@ function ReaderPage({ state, basePath = '' }: { state: AppState; basePath?: stri
   if (!note) return <NotFound />
   if (note.contentLoaded === false) return <p role="status">Открываем заметку…</p>
   const job = state.jobs.find(j => j.id === note.jobId)
-  return <><div className="reader-heading"><h1>{note.title}</h1><div className="reader-info"><div className="reader-meta"><time dateTime={new Date(note.createdAt).toISOString()}>{formatDate(note.createdAt)}</time>{note.origin !== 'manual' && <span>{note.isMock ? 'Учебный пример' : job?.provider ? `Из видео · ${PROVIDER_NAMES[job.provider]}` : 'Из видео'}</span>}</div></div></div>{!basePath && note.isMock && <p className="reader-demo">Учебный пример. Содержимое источника не анализировалось.</p>}{/^#{2,4}\s/m.test(note.markdown) && <div className="mobile-toc"><button aria-expanded={mobileToc} onClick={() => setMobileToc(!mobileToc)}><ListOrdered size={16} />Оглавление<ChevronDown size={15} /></button>{mobileToc && <div onClick={event => { if ((event.target as HTMLElement).closest('a')) setMobileToc(false) }}><QuartzToc markdown={note.markdown} /></div>}</div>}<QuartzArticle title={note.title} markdown={note.markdown} /><div className="mobile-context"><SourceDetails note={note} state={state} /></div><Link className="back-link" to={`${basePath}/courses/${note.courseId}`}><ArrowLeft size={15} />К курсу</Link></>
+  return <><div className="reader-heading"><h1>{note.title}</h1><div className="reader-info"><div className="reader-meta"><time dateTime={new Date(note.createdAt).toISOString()}>{formatDate(note.createdAt)}</time>{job?.pdfAssetId && <a href="#presentation">Презентация</a>}{note.origin !== 'manual' && <span>{note.isMock ? 'Учебный пример' : job?.provider ? `Из видео · ${PROVIDER_NAMES[job.provider]}` : 'Из видео'}</span>}</div></div></div>{!basePath && note.isMock && <p className="reader-demo">Учебный пример. Содержимое источника не анализировалось.</p>}{entries.length > 0 && <div className="mobile-toc"><button aria-expanded={mobileToc} onClick={() => setMobileToc(!mobileToc)}><ListOrdered size={16} />Оглавление<ChevronDown size={15} /></button>{mobileToc && <div onClick={event => { if ((event.target as HTMLElement).closest('a')) setMobileToc(false) }}><QuartzToc entries={entries} /></div>}</div>}<QuartzArticle onOutline={onOutline} title={note.title} markdown={note.markdown} />{job?.pdfAssetId && <Presentation key={job.pdfAssetId} asset={job.pdfAssetId} embedded={note.markdown.includes(`/api/assets/${job.pdfAssetId}/slides/`)} name={job.pdfName ?? "Слайды.pdf"} />}{job && <details className="mobile-context mobile-source"><summary>Материалы и параметры</summary><SourceDetails note={note} state={state}/></details>}<Link className="back-link" to={folderLink(note.courseId, note.category)}><ArrowLeft size={15} />К категории</Link></>
 }
 
 function SourceDetails({ note, state }: { note: Note; state: AppState }) {
   const job = state.jobs.find(j => j.id === note.jobId)
   if (!job) return null
-  return <details className="source-details" open><summary>Об источнике<ChevronDown size={13} /></summary><dl><dt>{job.sourceType === 'file' ? 'Видеофайл' : 'Ссылка'}</dt><dd title={job.sourceName}>{job.sourceAssetId ? <a href={`/api/assets/${job.sourceAssetId}`} download>{job.sourceName}</a> : job.sourceName}</dd><dt>Параметры</dt><dd>{job.preset === 'lecture' ? 'Лекция' : 'Семинар'} · {LENGTH_LABELS[job.length]}</dd>{job.pdfName && <><dt>Презентация</dt><dd title={job.pdfName}>{job.pdfAssetId ? <a href={`/api/assets/${job.pdfAssetId}`} download>{job.pdfName}</a> : job.pdfName}<small>{job.mode === 'real' ? 'Текст слайдов передан модели.' : 'Выбрана для демо, не анализировалась.'}</small></dd></>}{job.instructions && <><dt>Инструкции</dt><dd>{job.instructions}</dd></>}</dl></details>
+  const parameters = [
+    ['Формат', job.preset === 'lecture' ? 'Лекция' : 'Семинар'],
+    ['Объём', job.targetWords ? `До ${job.targetWords} слов` : LENGTH_LABELS[job.length]],
+    ['Язык речи', { ru:'Русский', en:'Английский', auto:'Автоопределение' }[job.language ?? 'ru']],
+    ['Провайдер', job.mode === 'mock' ? 'Демо' : PROVIDER_NAMES[job.provider ?? 'codex']],
+    ['Модель', job.model], ['Глубина рассуждения', job.effort && (job.effortApplied ?? (job.mode === 'real' && job.provider === 'codex')) && {low:'Низкая',medium:'Средняя',high:'Высокая',xhigh:'Максимальная'}[job.effort]],
+    ['Иллюстрации', job.pdfName && slidePolicy(job.slideLimit)], ['Инструкции', job.instructions],
+  ]
+  return <section className="source-details" aria-label="Материалы и параметры">
+    <h3>Материалы</h3><dl><dt>{job.sourceType === 'file' ? 'Видеофайл' : 'Ссылка'}</dt><dd title={job.sourceName}>{job.sourceAssetId ? <a href={`/api/assets/${job.sourceAssetId}`} download>{job.sourceName}</a> : job.sourceName}</dd>
+    {job.pdfName && <><dt>Презентация</dt><dd>{job.pdfAssetId ? <a href="#presentation">{job.pdfName}</a> : job.pdfName}</dd></>}</dl>
+    <h3>Параметры генерации</h3><dl>{parameters.filter(([,value]) => value).map(([label,value]) => <Fragment key={String(label)}><dt>{label}</dt><dd>{value}</dd></Fragment>)}</dl>
+    {job.slideTextCondensed ? <p>Для генерации использованы выдержки из презентации.</p> : null}
+  </section>
 }
 
-function JobSteps({ job }: { job?: Job }) {
-  const current = job ? STAGES.findIndex(stage => stage.status === job.status) : -1
-  return <div className="context-block job-steps"><h2>Стадии задания</h2><p className="context-description">{job ? job.title : 'Нет выбранного задания'}</p><ol>{STAGES.map((stage, index) => {
-    const done = job?.status === 'ready' || index < current
-    const active = index === current
-    return <li key={stage.status} className={`${done ? 'step-done' : ''} ${active ? 'step-active' : ''}`}><span className="step-icon">{done ? <Check size={12} /> : active ? <LoaderCircle className="spin" size={14} /> : <Circle size={8} />}</span><span>{stage.label}{active && <small>{job?.mode === 'real' ? 'Обработка' : 'Демо-стадия'}</small>}</span></li>
-  })}<li className={job?.status === 'ready' ? 'step-done' : ''}><span className="step-icon">{job?.status === 'ready' ? <Check size={12} /> : <Circle size={8} />}</span><span>Готовый конспект</span></li></ol><p className="context-note">{job?.mode === 'real' ? `Whisper + ${PROVIDER_NAMES[job.provider ?? 'codex']}` : 'Демо'} · по одному заданию</p></div>
+function JobSteps({ job }: { job: Job }) {
+  const [clock, setClock] = useState(Date.now)
+  useEffect(() => {
+    if (job?.status !== 'generating' || !job.stageStartedAt) return
+    setClock(Date.now())
+    const timer = window.setInterval(() => setClock(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [job?.status, job?.stageStartedAt])
+  const elapsed = Math.max(0, Math.floor((clock - (job.stageStartedAt ?? clock)) / 1000))
+  const steps = STAGES.filter(step => step.status !== 'preparing' || job.pdfName)
+  const current = steps.findIndex(step => step.status === (job.status === 'failed' ? job.failedStage : job.status))
+  return <section className="job-steps context-block" aria-label="Ход задания">
+    <h2 className="sr-only">Этапы задания «{job.title}»</h2>
+
+    <ol>{steps.map((step, index) => {
+      const done = job.status === 'ready' || (current >= 0 && index < current)
+      const active = step.status === job.status
+      return <li key={step.status} aria-current={active ? 'step' : undefined} className={done ? 'step-done' : active ? 'step-active' : job.status === 'failed' && index === current ? 'step-failed' : ''}>
+        <span className="step-icon">{done ? <Check size={13} /> : active ? <LoaderCircle className="spin" size={15}/> : job.status === 'failed' && index === current ? <X size={13}/> : <Circle size={7}/>}</span>
+        <div>{step.status === 'preparing' ? 'Чтение презентации' : step.label}
+          {((step.status === 'transcribing' && job.transcriptReused) || (step.status === 'preparing' && job.slidesReused)) && <small>Из кэша</small>}
+          {active && step.status === 'transcribing' && job.recognitionPercent !== undefined && <div className="recognition-progress"><progress aria-label="Распознано аудио" value={job.recognitionPercent} max={100}/><span>{job.recognitionPercent}%</span></div>}
+          {step.status === 'generating' && job.model && <small>{job.model}{active && job.stageStartedAt && <time aria-label="Время ожидания ответа модели"> · {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}</time>}</small>}
+        </div>
+      </li>
+    })}</ol>
+
+  </section>
 }
 
-function NotFound() { return <div className="quiet-empty"><BookOpen size={30} /><h1>Страница не найдена</h1><p>Проверьте выбранного пользователя и доступ к курсу.</p><Button asChild variant="outline"><Link to="/">В библиотеку<ArrowLeft size={15} /></Link></Button></div> }
+function NotFound() { return <div className="quiet-empty"><BookOpen size={30} /><h1>Страница не найдена</h1><p>Проверьте ссылку и доступ к категории.</p><Button asChild variant="outline"><Link to="/">В библиотеку<ArrowLeft size={15} /></Link></Button></div> }

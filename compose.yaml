@@ -52,7 +52,7 @@ services:
     environment: *environment
     volumes: ["data:/data", "jobs:/jobs", "secret-media:/secrets/media", "secret-providers:/secrets/providers", "secret-auth:/secrets/auth"]
     tmpfs: ["/tmp:rw,noexec,nosuid,size=650m"]
-    networks: [private, accounts]
+    networks: [private, accounts, processing]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/health')"]
       interval: 10s
@@ -86,6 +86,8 @@ services:
     cpus: 4
   providers:
     <<: *app
+    environment: {LV_LOCAL_MODEL_BASES: "${LV_LOCAL_MODEL_BASES:-}"}
+    extra_hosts: ["host.docker.internal:host-gateway"]
     build: {context: ., dockerfile: deploy/Dockerfile.providers}
     volumes: ["profiles:/profiles", "secret-providers:/secrets:ro"]
     tmpfs: ["/tmp:rw,noexec,nosuid,size=64m", "/work:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"]

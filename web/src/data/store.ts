@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { initialState, STORAGE_KEY, type AppState, type JobInput, type Note } from './model'
-import { api, ApiError } from './api'
+import { api, ApiError, uploadJob } from './api'
 
 export type User = { id: string; name: string; email: string; verified: boolean }
 type Session = { loading: boolean; user: User | null; emailVerification: boolean; supportEmail?: string; error: string }
@@ -43,7 +43,7 @@ async function refresh(force = false) {
           const cached = noteCache.get(note.id)
           const editing = window.location.pathname === `/notes/${note.id}/edit`
           if (cached && cached.revision !== note.revision && !editing) noteCache.delete(note.id)
-          return cached && (cached.revision === note.revision || editing) ? cached : note
+          return cached && (cached.revision === note.revision || editing) ? { ...cached, category: note.category } : note
         })
         for (const id of noteCache.keys()) if (!notes.some(note => note.id === id)) noteCache.delete(id)
         state = { ...state, ...payload, notes }; emit()
@@ -110,9 +110,17 @@ export const library = {
       noteCache.delete(id); noteCache.set(id, note)
       const evicted = new Set<string>()
       while (noteCache.size > 20) { const oldId = noteCache.keys().next().value!; noteCache.delete(oldId); evicted.add(oldId) }
-      state = { ...state, notes: state.notes.map(existing => existing.id === id ? note : evicted.has(existing.id) ? { ...existing, markdown: '', contentLoaded: false } : existing) }; emit()
+      state = { ...state, notes: state.notes.map(existing => existing.id === id ? { ...note, category: existing.category } : evicted.has(existing.id) ? { ...existing, markdown: '', contentLoaded: false } : existing) }; emit()
     }).catch(error => library.reportError(error)).finally(() => { noteRequests.delete(key) })
     noteRequests.set(key, request); return request
+  },
+  async moveNote(id: string, path: string) {
+    await api(`/notes/${id}/category`, { method: 'PUT', body: JSON.stringify({ path, existingOnly: true }) })
+    await refresh(true)
+  },
+  async setCourseIcon(id: string, icon: string, path = '') {
+    await api(`/courses/${id}/icon`, { method: 'PUT', body: JSON.stringify({ icon, path }) })
+    await refresh(true)
   },
   async deleteNote(id: string) { await api(`/notes/${id}`, { method: 'DELETE' }); noteCache.delete(id); await refresh(true) },
   async deleteCourse(id: string) { await api(`/courses/${id}`, { method: 'DELETE' }); await refresh(true) },
@@ -122,8 +130,18 @@ export const library = {
     state = { ...state, expandedCourses: [...new Set([...state.expandedCourses, result.id])] }; savePreferences()
     return result.id
   },
-  async createNote(courseId: string) {
-    const note = await api<Note>('/notes', { method: 'POST', body: JSON.stringify({ courseId }) })
+  async reorganizeCategory(id: string, path: string, operation: 'rename'|'remove-level', name: string) {
+    const result = await api<{path: string}>(`/courses/${id}/folders`, {method: 'PATCH', body: JSON.stringify({path, operation, name})})
+    await refresh(true)
+    return result.path
+  },
+  async createFolder(courseId: string, parent: string, name: string) {
+    const result = await api<{path: string}>(`/courses/${courseId}/folders`, {method: 'POST', body: JSON.stringify({ parent, name })})
+    await refresh(true)
+    return result.path
+  },
+  async createNote(courseId: string, category = '') {
+    const note = await api<Note>('/notes', { method: 'POST', body: JSON.stringify({ courseId, category }) })
     noteCache.set(note.id, { ...note, contentLoaded: true })
     await refresh(true)
     if (!state.expandedCourses.includes(courseId)) library.toggleCourse(courseId)
@@ -135,16 +153,16 @@ export const library = {
     if (session.user?.id !== owner) return note
     const loaded = { ...note, contentLoaded: true }
     noteCache.set(note.id, loaded)
-    state = { ...state, notes: state.notes.map(item => item.id === id ? loaded : item) }; emit()
+    state = { ...state, notes: state.notes.map(item => item.id === id ? { ...loaded, category: item.category } : item) }; emit()
     await refresh(true)
     return note
   },
-  async createJob(input: JobInput, video?: File, pdf?: File) {
+  async createJob(input: JobInput, video?: File, pdf?: File, progress?: (percent: number) => void) {
     const owner = session.user?.id
     const body = new FormData(); body.set('metadata', JSON.stringify(input))
     if (video) body.set('video', video)
     if (pdf) body.set('pdf', pdf)
-    const result = await api<{ id: string }>('/jobs', { method: 'POST', body })
+    const result = progress ? await uploadJob(body, progress) : await api<{ id: string }>('/jobs', { method: 'POST', body })
     await refresh(true)
     if (owner === session.user?.id && !state.expandedCourses.includes(input.courseId)) library.toggleCourse(input.courseId)
     return result.id

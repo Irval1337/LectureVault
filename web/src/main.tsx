@@ -10,6 +10,9 @@ import './styles.css'
 import App from './App'
 import { SessionGate } from './components/session'
 
+import { initializeTheme } from './components/theme'
+
+initializeTheme()
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode><BrowserRouter><SessionGate><App /></SessionGate></BrowserRouter></React.StrictMode>,
 )

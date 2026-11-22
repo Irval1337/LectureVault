@@ -32,3 +32,25 @@ backups/
 *.key
 auth.json
 credentials.json
+
+# Python / tests
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage/
+
+# SQLite
+*.sqlite
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

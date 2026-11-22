@@ -13,13 +13,13 @@ export function Dialog({ open, onOpenChange, title, description, children, class
   return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
     <DialogPrimitive.Portal>
       <DialogPrimitive.Overlay className="dialog-overlay" />
-      <DialogPrimitive.Content className={`dialog-content ${className}`} onCloseAutoFocus={event => {
+      <DialogPrimitive.Content className={`dialog-content ${className}`} {...(!description ? { 'aria-describedby': undefined } : {})} onCloseAutoFocus={event => {
         const target = returnFocus.current
         const otherDialog = document.querySelector('[role="dialog"][data-state="open"]')
         if (target?.isConnected && (!otherDialog || otherDialog.contains(target))) { event.preventDefault(); target.focus({ preventScroll: true }) }
       }}>
         <DialogPrimitive.Title className="dialog-title">{title}</DialogPrimitive.Title>
-        <DialogPrimitive.Description className="dialog-description">{description}</DialogPrimitive.Description>
+        {description && <DialogPrimitive.Description className="dialog-description">{description}</DialogPrimitive.Description>}
         {children}
         <DialogPrimitive.Close className="dialog-close button button-ghost button-icon" aria-label="Закрыть"><X size={18} /></DialogPrimitive.Close>
       </DialogPrimitive.Content>

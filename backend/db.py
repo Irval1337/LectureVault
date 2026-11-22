@@ -67,6 +67,9 @@ def initialize(settings: Settings):
         CREATE TABLE IF NOT EXISTS courses (
           id TEXT PRIMARY KEY, title TEXT NOT NULL, workspace TEXT NOT NULL,
           owner_id TEXT NOT NULL, created_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS course_invites (
+          course_id TEXT PRIMARY KEY REFERENCES courses(id) ON DELETE CASCADE,
+          digest TEXT NOT NULL UNIQUE, role TEXT NOT NULL, expires INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS members (
           course_id TEXT REFERENCES courses(id), user_id TEXT NOT NULL,
           role TEXT CHECK(role IN ('editor','viewer')) NOT NULL,
@@ -76,6 +79,13 @@ def initialize(settings: Settings):
           title TEXT NOT NULL, markdown TEXT NOT NULL DEFAULT '', origin TEXT NOT NULL,
           revision INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
           job_id TEXT UNIQUE, is_mock INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS note_categories (
+          note_id TEXT PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE, path TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS category_folders (
+          course_id TEXT REFERENCES courses(id) ON DELETE CASCADE NOT NULL,
+          path TEXT NOT NULL, PRIMARY KEY(course_id,path));
+        CREATE TABLE IF NOT EXISTS course_icons (
+          course_id TEXT PRIMARY KEY REFERENCES courses(id) ON DELETE CASCADE, icon TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS jobs (
           id TEXT PRIMARY KEY, course_id TEXT REFERENCES courses(id) NOT NULL,
           created_by TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL,
@@ -85,6 +95,12 @@ def initialize(settings: Settings):
           id TEXT PRIMARY KEY, course_id TEXT REFERENCES courses(id) NOT NULL,
           note_id TEXT, job_id TEXT, name TEXT NOT NULL, mime TEXT NOT NULL,
           path TEXT NOT NULL, size INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS media_results (
+          course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+          digest TEXT NOT NULL, operation TEXT NOT NULL, variant TEXT NOT NULL,
+          version TEXT NOT NULL, result BLOB NOT NULL, touched INTEGER NOT NULL,
+          PRIMARY KEY(course_id,digest,operation,variant));
+        CREATE INDEX IF NOT EXISTS media_result_age ON media_results(touched);
         CREATE TABLE IF NOT EXISTS sessions (
           digest TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS provider_links (user_id TEXT PRIMARY KEY REFERENCES users(id));
@@ -93,6 +109,17 @@ def initialize(settings: Settings):
         CREATE INDEX IF NOT EXISTS note_course ON notes(course_id);
         CREATE INDEX IF NOT EXISTS job_course ON jobs(course_id);
         ''')
+        if 'sha256' not in {row['name'] for row in db.execute('PRAGMA table_info(assets)')}:
+            db.execute('ALTER TABLE assets ADD COLUMN sha256 TEXT')
+        db.execute('CREATE INDEX IF NOT EXISTS asset_content ON assets(course_id,sha256,mime)')
+        db.execute('CREATE INDEX IF NOT EXISTS asset_path ON assets(path)')
+        if 'icon' not in {row['name'] for row in db.execute('PRAGMA table_info(category_folders)')}:
+            db.execute("ALTER TABLE category_folders ADD COLUMN icon TEXT NOT NULL DEFAULT 'folder'")
+        # Preserve old note-derived categories, including their intermediate parents.
+        for row in db.execute('SELECT DISTINCT course_id,path FROM notes JOIN note_categories ON notes.id=note_id'):
+            parts = row['path'].split('/')
+            db.executemany('INSERT OR IGNORE INTO category_folders(course_id,path) VALUES (?,?)',
+                           [(row['course_id'], '/'.join(parts[:i+1])) for i in range(len(parts))])
         columns = {row['name'] for row in db.execute('PRAGMA table_info(sessions)')}
         for name in ['created_at', 'last_seen']:
             if name not in columns:

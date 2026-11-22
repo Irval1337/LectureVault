@@ -1,36 +1,26 @@
-"""Server-owned provider, credential and model options."""
+"""Public descriptors. Model availability is discovered by the isolated broker."""
 import re
 from typing import Literal
 
 ProviderId = Literal['codex', 'claude', 'openai']
-
+OPENAI_BASE = 'https://api.openai.com/v1'
+ANTHROPIC_BASE = 'https://api.anthropic.com/v1'
 CATALOG = [
-    {'id': 'codex', 'name': 'Codex', 'authType': 'deviceCode', 'models': [
-        {'id': 'gpt-6.1-sol', 'name': 'GPT-6.1 Sol', 'efforts': ['low', 'medium', 'high', 'xhigh']},
-        {'id': 'gpt-6.1-terra', 'name': 'GPT-6.1 Terra', 'efforts': ['low', 'medium', 'high', 'xhigh']},
-        {'id': 'gpt-6-luna', 'name': 'GPT-6 Luna', 'efforts': ['low', 'medium', 'high']},
-    ]},
-    {'id': 'claude', 'name': 'Claude', 'authType': 'apiKey', 'models': [
-        {'id': 'sonnet', 'name': 'Sonnet', 'efforts': ['low', 'medium', 'high']},
-        {'id': 'opus', 'name': 'Opus', 'efforts': ['low', 'medium', 'high']},
-    ]},
-    {'id': 'openai', 'name': 'OpenAI API', 'authType': 'apiKey', 'models': [
-        {'id': 'gpt-6.1-terra', 'name': 'GPT-6.1 Terra', 'efforts': ['low', 'medium', 'high']},
-        {'id': 'gpt-6.1-sol', 'name': 'GPT-6.1 Sol', 'efforts': ['low', 'medium', 'high']},
-    ]},
+    {'id': 'codex', 'name': 'Codex', 'authType': 'deviceCode', 'models': []},
+    {'id': 'openai', 'name': 'Свой API', 'authType': 'apiKey', 'models': []},
+    {'id': 'claude', 'name': 'Claude Code', 'authType': 'apiKey', 'models': []},
 ]
 PROVIDERS = {p['id']: p for p in CATALOG}
-
-
+EFFORTS = ('low', 'medium', 'high', 'xhigh')
 def valid_api_key(provider, key):
-    if not isinstance(key, str) or not 20 <= len(key) <= 512:
+    if not isinstance(key, str) or len(key) > 512:
         return False
     if provider == 'claude':
         return bool(re.fullmatch(r'sk-ant-[A-Za-z0-9_-]{14,500}', key))
-    if provider == 'openai':
-        return bool(re.fullmatch(r'sk-(?!ant-)[A-Za-z0-9_-]+', key))
-    return False
+    return provider == 'openai' and all(32 < ord(ch) < 127 for ch in key)
 
+def valid_model(model):
+    return isinstance(model, str) and bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,179}', model))
 
 def valid_options(provider, model, effort):
-    return any(p['id'] == provider and any(m['id'] == model and effort in m['efforts'] for m in p['models']) for p in CATALOG)
+    return provider in PROVIDERS and valid_model(model) and effort in EFFORTS

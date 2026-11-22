@@ -22,7 +22,7 @@ def main():
     project = f'lecturevault-tests-{os.getpid()}'
     port, mail_port = free_port(), free_port()
     env = {**os.environ, 'LECTUREVAULT_PORT': str(port), 'LECTUREVAULT_MAIL_PORT': str(mail_port), 'LV_MAILPIT_URL': f'http://127.0.0.1:{mail_port}', 'LV_PUBLIC_URL': f'http://127.0.0.1:{port}', 'LV_ENV': 'test', 'LV_MOCK_SECONDS': '4', 'TEST_BASE_URL': f'http://127.0.0.1:{port}', 'LV_E2E_ISOLATED': '1'}
-    command = ['docker', 'compose', '-p', project]
+    command = ['docker', 'compose', '-p', project, '-f', 'compose.yaml', '-f', 'tests/compose.models.yaml']
     log = ROOT / 'test-results' / 'compose.log'
     log.parent.mkdir(exist_ok=True)
     try:

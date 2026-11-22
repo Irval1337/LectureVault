@@ -21,3 +21,16 @@ describe('ready-made Markdown pipeline with original Quartz components', () => {
     expect(serialized).not.toContain('"href":"javascript:')
   })
 })
+
+it('keeps illustration alt text and captions separate from the validated size', () => {
+  const { tree } = compileMarkdown([
+    '![Узел](/demo-replication.svg "Подпись [width=75%]")',
+    'Текст ![0.50](/demo-replication.svg) внутри строки.',
+    '![Оригинал](/demo-replication.svg "Текст [width=javascript:bad]")',
+  ].join('\n\n'))
+  const images: Element[] = []
+  visit(tree, 'element', (node: Element) => { if (node.tagName === 'img') images.push(node) })
+  expect(images.map(image => [image.properties.alt, image.properties.title, image.properties.dataImageScale])).toEqual([
+    ['Узел', 'Подпись', 0.75], ['', undefined, 0.5], ['Оригинал', 'Текст [width=javascript:bad]', undefined],
+  ])
+})

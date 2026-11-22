@@ -30,7 +30,7 @@ def abi():
     return libc.syscall(444, 0, 0, 1)
 
 
-def restrict(home, work, temporary):
+def restrict(home, work, temporary, read_file=None):
     if platform.machine() not in {'x86_64', 'aarch64'} or abi() < 3:
         raise RuntimeError('Linux Landlock ABI 3 or newer is required')
     libc = ctypes.CDLL(None, use_errno=True)
@@ -42,6 +42,8 @@ def restrict(home, work, temporary):
         rules += [(p, READ_FILE | WRITE_FILE) for p in ['/dev/null', '/dev/urandom', '/dev/random', '/dev/zero', '/dev/tty']]
         rules += [(p, READ_FILE) for p in ['/proc/meminfo', '/proc/cpuinfo', '/proc/stat', '/proc/sys/kernel/osrelease']]
         rules += [(str(p), WRITE) for p in [home, work, temporary]]
+        if read_file is not None:
+            rules.append((str(read_file), READ_FILE))
         for path, rights in rules:
             if not Path(path).exists():
                 continue
@@ -66,9 +68,14 @@ def main():
     home, work, temporary = map(Path, sys.argv[1:4])
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024 * 1024, 256 * 1024 * 1024))
-    restrict(home, work, temporary)
+    command = sys.argv[4:]
+    read_file = None
+    if command[0] == '--read-file':
+        read_file = Path(command[1])
+        command = command[2:]
+    restrict(home, work, temporary, read_file)
     os.chdir(work)
-    os.execvpe(sys.argv[4], sys.argv[4:], os.environ)
+    os.execvpe(command[0], command, os.environ)
 
 
 if __name__ == '__main__':

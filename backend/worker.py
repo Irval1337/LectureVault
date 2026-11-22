@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import fcntl
 import json
 import logging
@@ -7,10 +9,13 @@ from pathlib import Path
 
 import httpx
 
+from .slides import embed_slides
 from .config import Settings
+from .media import media_result
 from .db import connect, job_json, now, uid
 
 log = logging.getLogger('lecturevault.worker')
+speech_slot = threading.Lock()
 STAGES = ['acquiring', 'transcribing', 'preparing', 'generating']
 
 
@@ -35,14 +40,14 @@ def check_active(db, job_id):
     if not row or row['status'] in ('ready', 'failed', 'cancelled'):
         raise JobStopped()
     if row['error_code'] == 'ACCESS_REVOKED' or not row['writable']:
-        raise JobError('ACCESS_REVOKED', 'Права на запись в курс отозваны.')
+        raise JobError('ACCESS_REVOKED', 'Права на запись в категорию отозваны.')
 
 
 def set_stage(settings, job_id, status):
     with connect(settings) as db:
         db.execute('BEGIN IMMEDIATE')
         check_active(db, job_id)
-        db.execute('UPDATE jobs SET status=? WHERE id=?', (status, job_id))
+        db.execute("UPDATE jobs SET status=?,payload=json_set(payload,'$.stageStartedAt',?) WHERE id=?", (status, now(), job_id))
     log.info('job=%s stage=%s', job_id, status)
 
 
@@ -65,6 +70,7 @@ def rpc(settings, service, endpoint, body, timeout=3600):
 def run_job(settings, row):
     job = job_json(row)
     job_id = job['id']
+    resolved_model = None
     try:
         set_stage(settings, job_id, 'acquiring')
         if job['mode'] == 'mock':
@@ -78,19 +84,36 @@ def run_job(settings, row):
             markdown = (Path(__file__).resolve().parents[1] / 'fixtures/demo-note.md').read_text()
             markdown += '\n\n## Сравнение\n\n| Способ | Свойство |\n| --- | --- |\n| Репликация | Избыточность |\n\n![Демонстрация](/demo-replication.svg)\n\n*Mock: источник не анализировался.*\n'
         else:
-            set_stage(settings, job_id, 'transcribing')
-            result = rpc(settings, settings.media_url, '/transcribe', {'jobId': job_id, 'video': job['videoPath'], 'language': job.get('language', 'ru')})
+            (settings.jobs / job_id / 'recognition.progress').unlink(missing_ok=True)
+            with speech_slot:
+                set_stage(settings, job_id, 'transcribing')
+                result, reused = media_result(settings, rpc, job.get('sourceAssetId'), '/transcribe',
+                                              {'jobId': job_id, 'video': job['videoPath'], 'language': job.get('language', 'ru')}, 3600)
+                with connect(settings) as db:
+                    db.execute("UPDATE jobs SET payload=json_set(payload,'$.transcriptReused',json(?)) WHERE id=?", (json.dumps(reused), job_id))
             transcript = result['text']
             if len(transcript.strip()) < 10:
                 raise JobError('NO_SPEECH', 'Whisper не обнаружил достаточно речи. Проверьте звуковую дорожку.')
-            set_stage(settings, job_id, 'preparing')
             slides = ''
+            slide_count = 0
             if job.get('pdfPath'):
-                result = rpc(settings, settings.media_url, '/slides', {'jobId': job_id, 'pdf': job['pdfPath']}, timeout=180)
+                set_stage(settings, job_id, 'preparing')
+                result, reused = media_result(settings, rpc, job.get('pdfAssetId'), '/slides',
+                                              {'jobId': job_id, 'pdf': job['pdfPath']}, 180)
+                with connect(settings) as db:
+                    db.execute("UPDATE jobs SET payload=json_set(payload,'$.slidesReused',json(?)) WHERE id=?", (json.dumps(reused), job_id))
                 slides = result['text']
+                if result.get('condensed'):
+                    with connect(settings) as db:
+                        db.execute("UPDATE jobs SET payload=json_set(payload,'$.slideTextCondensed',1) WHERE id=?", (job_id,))
+                slide_count = result.get('pages', 0)
             set_stage(settings, job_id, 'generating')
-            result = rpc(settings, settings.provider_url(row['created_by']), '/generate', {'userId': row['created_by'], 'provider': job.get('provider', 'codex'), 'model': job.get('model', 'gpt-6.1-sol'), 'effort': job.get('effort', 'medium'), 'title': job['title'], 'preset': job['preset'], 'length': job['length'], 'instructions': job['instructions'], 'transcript': transcript[:140000], 'slides': slides[:40000]}, timeout=300)
+            result = rpc(settings, settings.provider_url(row['created_by']), '/generate', {'userId': row['created_by'], 'provider': job.get('provider', 'codex'), 'model': job.get('model') or '', 'effort': job.get('effort', 'medium'), 'apiBase': job.get('apiBase'), 'title': job['title'], 'preset': job['preset'], 'targetWords': job.get('targetWords'), 'slideLimit': job.get('slideLimit', 6), 'length': job['length'], 'instructions': job['instructions'], 'transcript': transcript[:140000], 'slides': slides[:40000]}, timeout=300)
             markdown = result['markdown']
+            resolved_model = result.get('model')
+            if isinstance(markdown, str) and markdown.strip() and job.get('pdfAssetId') and 0 < slide_count <= 500:
+                markdown = embed_slides(markdown, job['pdfAssetId'], slide_count, job.get('slideLimit', 6))
+
         if not isinstance(markdown, str) or not markdown.strip() or len(markdown) > 200000:
             raise JobError('INVALID_MARKDOWN', 'Обработчик вернул пустой или слишком большой документ.')
         with connect(settings) as db:
@@ -103,11 +126,17 @@ def run_job(settings, row):
             else:
                 owner = db.execute('SELECT owner_id FROM courses WHERE id=?', (job['courseId'],)).fetchone()
                 if not owner:
-                    raise JobError('COURSE_MISSING', 'Курс удалён.')
+                    raise JobError('COURSE_MISSING', 'Категория удалена.')
                 usage = db.execute('SELECT count(*),coalesce(sum(length(CAST(n.markdown AS BLOB))),0) FROM notes n JOIN courses c ON c.id=n.course_id WHERE c.owner_id=?', (owner['owner_id'],)).fetchone()
                 if usage[0] >= 5000 or usage[1] + len(markdown.encode()) > 25 * 1024 * 1024:
-                    raise JobError('NOTE_QUOTA', 'Лимит заметок владельца курса исчерпан. Удалите ненужные заметки и повторите.')
+                    raise JobError('NOTE_QUOTA', 'Лимит заметок владельца категории исчерпан. Удалите ненужные заметки и повторите.')
                 db.execute('INSERT INTO notes VALUES (?,?,?,?,?,?,?,?,?,?)', (note_id, job['courseId'], job['title'], markdown, 'generated', 1, now(), now(), job_id, int(job['mode'] == 'mock')))
+                # A user can rename the destination while transcription is running.
+                category = db.execute("SELECT json_extract(payload,'$.category') FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
+                if category:
+                    db.execute('INSERT INTO note_categories VALUES (?,?)', (note_id, category))
+            if resolved_model and resolved_model != job.get('model'):
+                db.execute("UPDATE jobs SET payload=json_set(payload,'$.model',?) WHERE id=?", (resolved_model, job_id))
             db.execute("UPDATE jobs SET status='ready',completed_at=?,note_id=?,error=NULL,error_code=NULL WHERE id=?", (now(), note_id, job_id))
         log.info('job=%s stage=ready', job_id)
     except JobStopped:
@@ -116,7 +145,7 @@ def run_job(settings, row):
         code = error.code if isinstance(error, JobError) else 'PROCESSING_ERROR'
         message = error.message if isinstance(error, JobError) else 'Обработка завершилась ошибкой. Исходник сохранён; задание можно повторить.'
         with connect(settings) as db:
-            db.execute("UPDATE jobs SET status='failed',completed_at=?,error=?,error_code=? WHERE id=?", (now(), message, code, job_id))
+            db.execute("UPDATE jobs SET payload=json_set(payload,'$.failedStage',status),status='failed',completed_at=?,error=?,error_code=? WHERE id=?", (now(), message, code, job_id))
         log.warning('job=%s error=%s', job_id, code)
 
 
@@ -134,7 +163,7 @@ def claim(settings):
 
 def recover_interrupted(settings):
     with connect(settings) as db:
-        db.execute("UPDATE jobs SET status='failed',completed_at=?,error_code='INTERRUPTED',error='Обработка прервана перезапуском. Повторите задание.' WHERE status IN ('acquiring','transcribing','preparing','generating')", (now(),))
+        db.execute("UPDATE jobs SET payload=json_set(payload,'$.failedStage',status),status='failed',completed_at=?,error_code='INTERRUPTED',error='Обработка прервана перезапуском. Повторите задание.' WHERE status IN ('acquiring','transcribing','preparing','generating')", (now(),))
 
 
 def main():
@@ -148,12 +177,18 @@ def main():
         except BlockingIOError:
             raise SystemExit('Only one worker may run') from None
         recover_interrupted(settings)
-        while True:
-            row = claim(settings)
-            if row:
-                run_job(settings, row)
-            else:
-                time.sleep(.4)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            running = set()
+            while True:
+                for task in list(running):
+                    if task.done():
+                        task.result()
+                        running.remove(task)
+                row = claim(settings) if len(running) < 2 else None
+                if row:
+                    running.add(pool.submit(run_job, settings, row))
+                else:
+                    time.sleep(.4)
 
 
 if __name__ == '__main__':
