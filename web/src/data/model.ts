@@ -4,14 +4,20 @@ export type Workspace = 'personal' | 'shared'
 export const PROVIDER_NAMES = { codex: 'Codex', claude: 'Claude Code', openai: 'Свой API' } as const
 export type ProviderId = keyof typeof PROVIDER_NAMES
 export type Course = { folders?: string[]; folderIcons?: Record<string,string>; icon?: string; id: string; title: string; workspace: Workspace; createdAt: number; ownerId?: string; role?: 'owner' | 'editor' | 'viewer' }
-export type Note = { category?: string; id: string; courseId: string; title: string; markdown: string; createdAt: number; jobId?: string | null; contentLoaded?: boolean; revision?: number; origin?: 'manual' | 'generated'; isMock?: boolean; updatedAt?: number }
-export type JobStatus = 'queued' | 'acquiring' | 'transcribing' | 'preparing' | 'generating' | 'ready' | 'failed' | 'cancelled'
+export type Note = { category?: string; id: string; courseId: string; title: string; markdown: string; createdAt: number; jobId?: string | null; contentLoaded?: boolean; revision?: number; origin?: 'manual' | 'generated'; isMock?: boolean; updatedAt?: number; createdBy?: string | null }
+export const canDeleteNote = (course: Course | undefined, note: Note, userId: string | undefined) =>
+  course?.role === 'owner' || (course?.role === 'editor' && !!userId && note.createdBy === userId)
+export type JobStatus = 'queued' | 'acquiring' | 'transcribing' | 'waiting_generation' | 'preparing' | 'generating' | 'ready' | 'failed' | 'cancelled'
 export type JobInput = { category?: string;
   courseId: string; title: string; sourceType: 'file' | 'url'; sourceName: string; sourceSize?: number;
+  reuseJobId?: string;
   preset: 'lecture' | 'seminar'; length: 'short' | 'medium' | 'detailed'; instructions: string;
   targetWords?: number; slideLimit?: number | null; apiBase?: string; pdfName?: string; timestamps: boolean; mode?: 'mock' | 'real'; language?: 'ru' | 'en' | 'auto'; sourceAssetId?: string; pdfAssetId?: string; provider?: ProviderId; model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh'
 }
-export type Job = JobInput & { effortApplied?: boolean; transcriptReused?: boolean; slidesReused?: boolean; slideTextCondensed?: number; recognitionPercent?: number; stageStartedAt?: number; failedStage?: JobStatus; id: string; status: JobStatus; createdAt: number; startedAt?: number; completedAt?: number; attempt: number; createdBy?: string; error?: string; noteId?: string }
+export type Job = JobInput & { canRetry?: boolean; transcriptAssetId?: string; effortApplied?: boolean; transcriptReused?: boolean; slidesReused?: boolean; slideTextCondensed?: number; recognitionPercent?: number; stageStartedAt?: number; failedStage?: JobStatus; id: string; status: JobStatus; createdAt: number; startedAt?: number; completedAt?: number; attempt: number; createdBy?: string; error?: string; noteId?: string }
+export function reuseMaterialsUrl(job: Pick<Job, 'id' | 'courseId' | 'category'>) {
+  return '/new?' + new URLSearchParams({ fromJob: job.id, course: job.courseId, folder: job.category ?? '' })
+}
 export type AppState = { version: 1; courses: Course[]; notes: Note[]; jobs: Job[]; expandedCourses: string[]; readerTheme: 'dark' | 'light' }
 
 export const STORAGE_KEY = 'lecturevault.library.v1'
@@ -24,11 +30,12 @@ export const STAGES = [
 export const TOTAL_DURATION = STAGES.reduce((sum, s) => sum + s.duration, 0)
 export const STATUS_LABELS: Record<JobStatus, string> = {
   queued: 'В очереди', acquiring: 'Подготовка источника', transcribing: 'Распознавание речи', preparing: 'Подготовка материалов',
-  generating: 'Создание конспекта', ready: 'Готово', failed: 'Ошибка', cancelled: 'Отменено',
+  waiting_generation: 'Расшифровка готова · ждёт генерации', generating: 'Создание конспекта', ready: 'Готово', failed: 'Ошибка', cancelled: 'Отменено',
 }
 export const LENGTH_LABELS = { short: 'Кратко', medium: 'Стандартно', detailed: 'Подробно' }
 export const initialState = (): AppState => ({ version: 1, courses: [], notes: [], jobs: [], expandedCourses: [], readerTheme: 'dark' })
 export const isActive = (job: Job) => STAGES.some(s => s.status === job.status)
+export const isQueued = (job: Job) => job.status === 'queued' || job.status === 'waiting_generation'
 
 export function validateUrl(value: string): string | null {
   try {

@@ -8,6 +8,6 @@ const Toc = lazy(() => import('../quartz/reader').then(m => ({ default: m.Quartz
 export function QuartzArticle(props: ArticleProps) {
   return <Suspense fallback={<p className="field-hint" role="status">Открываем конспект…</p>}><ReaderOverflow content={props.markdown}><Article {...props} /></ReaderOverflow></Suspense>
 }
-export function QuartzToc({ entries }: { entries: TocEntry[] }) {
-  return <Suspense fallback={<p className="field-hint">Оглавление…</p>}><Toc entries={entries} /></Suspense>
+export function QuartzToc(props: { entries: TocEntry[]; onNavigate?: () => void }) {
+  return <Suspense fallback={<p className="field-hint">Оглавление…</p>}><Toc {...props} /></Suspense>
 }

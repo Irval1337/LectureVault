@@ -75,11 +75,18 @@ test('note context menu, nested categories, course icon and collapsed settings s
   const recent = (await page.locator('.library-recent').boundingBox())!
   expect(recent.y).toBeGreaterThan(catalog.y + catalog.height)
   expect(Math.abs(recent.x - catalog.x)).toBeLessThan(1)
-  await capture(page, 'categories-library-1440')
-  await page.setViewportSize({width:768,height:1000})
-  await capture(page, 'categories-library-768')
-  await page.setViewportSize({ width: 390, height: 844 })
-  await capture(page, 'categories-library-390')
+  for (const width of [1440, 768, 390]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 })
+    const table = page.locator('.library-recent').getByRole('table')
+    const header = table.getByRole('columnheader', { name: 'Изменено' }).locator('..')
+    const row = table.getByRole('row').filter({ hasText: title })
+    const [headBox, rowBox] = await Promise.all([header.boundingBox(), row.boundingBox()])
+    expect(headBox!.x).toBeCloseTo(rowBox!.x, 0)
+    expect(headBox!.width).toBeCloseTo(rowBox!.width, 0)
+    await expect(header).toHaveCSS('border-bottom-width', '1px')
+    await expect(header.getByRole('columnheader', { name: 'Изменено' })).toHaveCSS('border-bottom-width', '0px')
+    await capture(page, 'categories-library-' + width)
+  }
   const main = page.getByRole('main')
   const dialog = page.getByRole('dialog')
   await main.getByRole('button', {name:'Создать категорию',exact:true}).click()
@@ -125,13 +132,15 @@ test('editable image sizes, table command and compact drag feedback change the s
   const courseId = await createCourse(page.request, 'Архитектура сети')
   const response = await page.request.post('/api/notes', { headers, data: { courseId, title: 'Устройство сети', markdown: '' } })
   const note = await response.json()
-  const jpeg = await page.evaluate(() => {
+  const jpeg = await page.evaluate(async () => {
     const canvas = document.createElement('canvas')
     canvas.width = 600
     canvas.height = 180
     const ctx = canvas.getContext('2d')!
-    ctx.fillStyle = '#334e68'
-    ctx.fillRect(0, 0, 600, 180)
+    const diagram = new Image()
+    diagram.src = '/demo-replication.svg'
+    await diagram.decode()
+    ctx.drawImage(diagram, 0, 0, canvas.width, canvas.height)
     return canvas.toDataURL('image/jpeg').split(',')[1]
   })
   const uploadPath = '/api/notes/' + note.id + '/assets'
@@ -244,6 +253,8 @@ test('editable image sizes, table command and compact drag feedback change the s
   expect(stored).toContain('Подпись в строке')
   expect(stored.indexOf('![Схема сети]')).toBeLessThan(stored.indexOf('Первый абзац'))
   expect(stored).toMatch(/Т[^\n]*!\[Узлы\][^\n]*абзац/)
+  await image.hover()
+  await expect(imageSelect).toBeVisible()
   await capture(page, 'block-editor-1440')
   await page.setViewportSize({ width: 390, height: 844 })
   await capture(page, 'block-editor-390')

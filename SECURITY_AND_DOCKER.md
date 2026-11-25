@@ -26,7 +26,7 @@ Opaque session cookie: HttpOnly/SameSite=Strict, в production Secure и __Host 
 
 Видео512МБ/2ч, PDF50МБ/100стр, PNG/JPEG/WebP10МБ; SVG upload/unsafe HTML/внешние embeds запрещены. UUID-имена, signature checks, path confinement/symlink checks, ограничения вывода/страниц/времени, no-root парсеры. До парсинга multipart API проверяет авторизацию, Nginx ограничивает тело. На владельца курса1ГБ assets/5000Note/25МБ Markdown/100курсов, всего10ГБ assets, на отправителя10активных/30новыхjobs в сутки. Финальные квоты перепроверяются транзакцией после upload. Видео/PDF не исполняются. Реальные URL/yt-dlp выключены: SSRF-путь не открыт, обхода через пользовательский endpoint нет.
 
-Транскрипт140000символов/PDF40000 не обрезаются молча. Все subprocess имеют timeout/process-group kill и bounded output. CPU Whisper tiny зафиксирован revision/SHA-256; GPU runtime отсутствует и не меняется. Качество длинных записей, OCR, кодеки всех возможных файлов и CUDA не гарантируются.
+Транскрипт140000символов/PDF40000 не обрезаются молча. Все subprocess имеют timeout/process-group kill и bounded output. Whisper base и Silero VAD зафиксированы по revision/SHA-256 и работают на CPU. Качество длинных записей, OCR, кодеки всех возможных файлов и CUDA не гарантируются.
 
 ## Локальный запуск
 
@@ -85,6 +85,13 @@ docker compose -p lecturevault-restored run --rm -T --no-deps -e TMPDIR=/backups
 ```
 
 Не запускать API перед restore: он заполнит пустую базу. После restore настроить новый SMTP secret/домен, поднять новый project на свободном порту. Пользователи восстанавливают пароли через email и подключают AI заново. Незаконченные jobs становятся failed/RESTORED; готовые документы и вложения сохраняются. Старый project/volumes не удаляются. Процедуру регулярно проверять на изолированной копии.
+
+Для объединения старых копий PDF, изображений и TXT дождитесь завершения заданий и остановите запись в хранилище. Используйте образ API с обновлённым кодом CLI. После резервного копирования и проверки восстановления выполните сначала пробный запуск, затем перенос. Команда сохраняет идентификаторы вложений и проверяет фактическое содержимое файлов.
+
+```bash
+docker compose run --rm -T --no-deps api python -m backend.manage deduplicate-storage --dry-run
+docker compose run --rm -T --no-deps api python -m backend.manage deduplicate-storage
+```
 
 ## Проверки и ограничения доказательств
 

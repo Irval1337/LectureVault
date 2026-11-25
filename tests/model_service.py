@@ -36,7 +36,10 @@ class Handler(BaseHTTPRequestHandler):
                 concurrent_requests.wait(timeout=20)
             except BrokenBarrierError:
                 return self.send_error(504)
-        time.sleep(4)  # Allow the browser to observe the generation stage through its normal polling interval.
+            # Keep both generation slots occupied while the browser observes the next two transcripts.
+            time.sleep(15)
+        else:
+            time.sleep(4)  # Let the regular generation stage appear in browser polling.
         self.send({'choices': [{'message': {'content': '## Результат\n\nРаспознана речь.\n\n[[slide:2]]'}, 'finish_reason': 'stop'}]})
 
 

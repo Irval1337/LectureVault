@@ -1,4 +1,4 @@
-import { test as base, expect, type APIRequestContext, type Page } from '@playwright/test'
+import { test as base, expect, type APIRequestContext, type BrowserContext, type Page } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
 import { readFile, writeFile, copyFile } from 'node:fs/promises'
 
@@ -6,6 +6,7 @@ export const headers = { 'X-LectureVault': '1' }
 export const password = 'A secure phrase for browser acceptance'
 export type Account = { id: string; email: string; name: string }
 export const shots = 'test-results/screenshots/public/'
+const sessions = new Map<string, Awaited<ReturnType<BrowserContext['cookies']>>>()
 export async function emailLink(request: APIRequestContext, email: string, path: string) {
   const mailbox = process.env.LV_MAILPIT_URL!
   let link = ''
@@ -45,8 +46,15 @@ export const test = base.extend<{}, { accounts: { author: Account; reader: Accou
 })
 export { expect }
 export async function signIn(page: Page, account: Account) {
-  const response = await page.request.post('/api/auth/login', { headers, data: { email: account.email, password } })
-  expect(response.status()).toBe(200)
+  const context = page.context()
+  const cookies = sessions.get(account.id)
+  if (cookies) await context.addCookies(cookies)
+  // Reuse a verified session across browser contexts, unless a test has logged out of it.
+  if (!cookies || (await (await page.request.get('/api/auth')).json()).user?.id !== account.id) {
+    const response = await page.request.post('/api/auth/login', { headers, data: { email: account.email, password } })
+    expect(response.status()).toBe(200)
+    sessions.set(account.id, await context.cookies())
+  }
   await page.goto('/')
   await expect(page.getByRole('heading', { name: 'Библиотека', exact: true })).toBeVisible()
 }

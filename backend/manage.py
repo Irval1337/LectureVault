@@ -1,8 +1,10 @@
 """Operator commands. Secrets are read interactively, never from command arguments."""
 import argparse
+from collections import defaultdict
 from contextlib import closing
 from datetime import datetime, timezone
 from getpass import getpass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +15,7 @@ import tempfile
 
 from .config import Settings
 from .db import connect, initialize
+from .media import BLOB_SUFFIXES, Upload, collect_storage_garbage, materialize_blob, regular_upload
 
 
 def backup(settings, output):
@@ -31,6 +34,8 @@ def backup(settings, output):
             with target:
                 for table in ['sessions', 'auth_tokens', 'mail_outbox', 'provider_links', 'rate_limits']:
                     target.execute(f'DELETE FROM {table}')
+                if target.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_leases'").fetchone():
+                    target.execute('DELETE FROM file_leases')
                 from .auth import DUMMY_HASH
                 target.execute('UPDATE users SET password_hash=?', (DUMMY_HASH,))
             target.execute('VACUUM')
@@ -42,11 +47,23 @@ def backup(settings, output):
                 archive.add(snapshot, arcname='data/lecturevault.sqlite3')
                 for path, name in [(settings.data / 'assets', 'data/assets'), (settings.jobs, 'jobs')]:
                     if path.exists():
-                        archive.add(path, arcname=name, recursive=True)
+                        archive.add(path, arcname=name, recursive=True, filter=backup_member(path, name))
                 manifest = Path(directory) / 'manifest.json'
                 manifest.write_text(json.dumps({'version': 1, 'createdAt': datetime.now(timezone.utc).isoformat(), 'providersIncluded': False, 'dataRoot': str(settings.data), 'jobsRoot': str(settings.jobs)}))
                 archive.add(manifest, arcname='manifest.json')
     print('Backup created. It contains private data: store it on encrypted storage with mode 0600.')
+
+
+def backup_member(root, archive_root):
+    def preserve_file(info):
+        if info.islnk():
+            # A pending file cleanup can briefly leave a second name for blob bytes.
+            file = root / Path(info.name).relative_to(archive_root)
+            info.size = file.lstat().st_size
+            info.type = tarfile.REGTYPE
+            info.linkname = ''
+        return info
+    return preserve_file
 
 
 def restore(settings, source):
@@ -65,20 +82,20 @@ def restore(settings, source):
         metadata = json.loads((root / 'manifest.json').read_text())
         if metadata.get('version') != 1:
             raise SystemExit('Unsupported backup version')
+        roots = [(Path(metadata['dataRoot']), settings.data), (Path(metadata['jobsRoot']), settings.jobs)]
         database = root / 'data' / 'lecturevault.sqlite3'
         with sqlite3.connect(database) as db:
             if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                 raise SystemExit('Invalid database')
-            for asset in db.execute('SELECT id,path FROM assets').fetchall():
-                old = Path(asset[1])
-                for source_root, target_root in [(Path(metadata['dataRoot']), settings.data), (Path(metadata['jobsRoot']), settings.jobs)]:
-                    if old.is_relative_to(source_root):
-                        new = target_root / old.relative_to(source_root)
-                        if not new.resolve().is_relative_to(target_root.resolve()):
-                            raise SystemExit('Unsafe asset path')
-                        db.execute('UPDATE assets SET path=? WHERE id=?', (str(new), asset[0])); break
-                else:
-                    raise SystemExit('Asset outside backup roots')
+            for asset_id, path in db.execute('SELECT id,path FROM assets').fetchall():
+                db.execute('UPDATE assets SET path=? WHERE id=?', (relocate(path, roots), asset_id))
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_leases'").fetchone():
+                db.execute('DELETE FROM file_leases')
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_garbage'").fetchone():
+                garbage = db.execute('SELECT path FROM media_garbage').fetchall()
+                db.execute('DELETE FROM media_garbage')
+                db.executemany('INSERT OR IGNORE INTO media_garbage(path) VALUES (?)',
+                               [(relocate(path, roots),) for path, in garbage])
             # Backups do not restore sessions, reset links or provider claims.
             db.execute('DELETE FROM sessions')
             db.execute('DELETE FROM auth_tokens')
@@ -94,7 +111,55 @@ def restore(settings, source):
         if (root / 'jobs').exists():
             shutil.copytree(root / 'jobs', settings.jobs, dirs_exist_ok=True)
         initialize(settings)
+        collect_storage_garbage(settings)
     print('Restore complete. Users must reset passwords by email. Provider profiles must use a new empty volume.')
+
+
+def relocate(path, roots):
+    old = Path(path)
+    for source_root, target_root in roots:
+        if old.is_relative_to(source_root):
+            new = target_root / old.relative_to(source_root)
+            if new.resolve().is_relative_to(target_root.resolve()):
+                return str(new)
+            break
+    raise SystemExit('Unsafe asset path in backup')
+
+
+def deduplicate_storage(settings, dry_run=False):
+    """Inspect the files with API and worker stopped. Apply one content group at a time."""
+    if not (settings.data / 'lecturevault.sqlite3').is_file():
+        raise SystemExit('No LectureVault storage database found')
+    with connect(settings) as db:
+        rows = db.execute('SELECT DISTINCT mime,path FROM assets ORDER BY mime,path').fetchall()
+    groups = defaultdict(list)
+    skipped = 0
+    for row in rows:
+        mime, path = row['mime'], Path(row['path'])
+        if mime not in BLOB_SUFFIXES:
+            continue
+        root = settings.jobs if mime == 'application/pdf' else settings.data / 'assets'
+        if not regular_upload(path, root):
+            skipped += 1
+            continue
+        with path.open('rb') as stream:
+            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            size = os.fstat(stream.fileno()).st_size
+        groups[(mime, digest, size)].append(path)
+    duplicates = sum(len(paths) - 1 for paths in groups.values())
+    bytes_saved = sum((len(paths) - 1) * key[2] for key, paths in groups.items())
+    if not dry_run:
+        initialize(settings)
+        for (mime, digest, size), paths in groups.items():
+            with connect(settings) as db:
+                db.execute('BEGIN IMMEDIATE')
+                db.executemany('UPDATE assets SET sha256=?,size=? WHERE mime=? AND path=?',
+                               [(digest, size, mime, str(path)) for path in paths])
+                item = Upload('', '', mime, str(paths[0]), size, digest)
+                materialize_blob(db, settings, item)
+        collect_storage_garbage(settings)
+    action = 'Dry run' if dry_run else 'Storage deduplicated'
+    print(f'{action}. {duplicates} duplicate files ({bytes_saved} bytes), {skipped} missing or unsafe files skipped.')
 
 
 def main():
@@ -104,6 +169,8 @@ def main():
     sub.add_parser('smtp-password')
     sub.add_parser('backup').add_argument('--output', required=True)
     sub.add_parser('restore').add_argument('--input', required=True)
+    sub.add_parser('deduplicate-storage', help='Consolidate stored PDFs, images and transcripts while offline').add_argument(
+        '--dry-run', action='store_true', help='Report duplicates without changing storage')
     args = parser.parse_args()
     settings = Settings()
     if os.geteuid() == 0:
@@ -127,6 +194,8 @@ def main():
         backup(settings, args.output)
     elif args.command == 'restore':
         restore(settings, args.input)
+    elif args.command == 'deduplicate-storage':
+        deduplicate_storage(settings, args.dry_run)
 
 
 if __name__ == '__main__':

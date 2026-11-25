@@ -171,7 +171,8 @@ def test_assets_signatures_quota_acl_and_symlinks(env):
     login(c, 'reader'); assert c.get(asset_url).status_code == 404
     assert c.post(url, files={'file': ('x.png', image, 'image/png')}).status_code == 404
     login(c); settings.user_quota = len(image)
-    assert c.post(url, files={'file': ('x.png', image, 'image/png')}).status_code == 507
+    assert c.post(url, files={'file': ('x.png', image, 'image/png')}).status_code == 201
+    assert c.post(url, files={'file': ('x.png', image + b'2', 'image/png')}).status_code == 507
     with connect(settings) as db:
         path = Path(db.execute('SELECT path FROM assets WHERE id=?', (response.json()['id'],)).fetchone()[0])
     path.unlink(); target = settings.data / 'private.png'; target.write_bytes(b'private'); path.symlink_to(target)
@@ -205,9 +206,128 @@ def test_real_preflight_requires_own_provider_and_mock_is_test_only(env, monkeyp
     result = job(c, cid, mode='real', files={'video': ('x.mp4', header, 'video/mp4')})
     assert result.status_code == 422 and result.json()['detail']['field'] == 'provider'
     assert seen[0]['userId'] == c.get('/api/auth').json()['user']['id']
-    assert not list(settings.jobs.iterdir())
+    assert not [path for path in settings.jobs.rglob('*') if path.is_file()]
     settings.environment = 'development'
     assert job(c, cid).status_code == 422
+
+
+def test_create_note_from_saved_materials_uses_selected_model(env, monkeypatch):
+    from backend import worker
+    c, settings, _, _ = env
+    cid = course(c)
+    transcript = 'Начало лекции. ' + ('Учебный материал с примерами. ' * 5000) + 'Последняя тема.'
+    calls = []
+
+    def rpc(_settings, _service, endpoint, body, **kwargs):
+        calls.append((endpoint, body))
+        if endpoint == '/providers/status':
+            return {'providers': [{'id': 'openai', 'connected': True, 'models': [
+                {'id': 'gemini-flash', 'supportsImages': True, 'efforts': []}]}]}
+        if endpoint == '/transcribe':
+            return {'text': transcript}
+        if endpoint == '/slides':
+            return {'text': '[Слайд 1] Схема', 'pages': 1}
+        if endpoint == '/slide-preview':
+            return {'jpeg': '/9j/2Q==', 'pages': 1}
+        if endpoint == '/generate':
+            return {'markdown': '## Последняя тема\n\nНовый конспект.'}
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(worker, 'rpc', rpc)
+    metadata = {'courseId': cid, 'title': 'Лекция', 'provider': 'openai', 'model': 'gemini-flash'}
+    video = b'\x00\x00\x00\x18ftypmp42' + b'\x00' * 20
+    pdf = b'%PDF-1.7\n%%EOF'
+    first = c.post('/api/jobs', data={'metadata': json.dumps(metadata)}, files={'video': ('a.mp4', video),
+                  'pdf': ('slides.pdf', pdf)}).raise_for_status().json()['id']
+    worker.run_job(settings, worker.claim(settings))
+    source = c.get('/api/jobs/' + first).raise_for_status().json()
+    assert source['status'] == 'ready'
+    metadata.update(title='Другой конспект', reuseJobId=first, length='detailed')
+    second = c.post('/api/jobs', data={'metadata': json.dumps(metadata)}).raise_for_status().json()['id']
+    worker.run_job(settings, worker.claim(settings))
+    result = c.get('/api/jobs/' + second).raise_for_status().json()
+    assert result['status'] == 'ready' and result['noteId'] != source['noteId']
+    assert result['transcriptAssetId'] == source['transcriptAssetId'] and result['transcriptReused']
+    assert result['pdfAssetId'] == source['pdfAssetId']
+    assert sum(endpoint == '/transcribe' for endpoint, _ in calls) == 1
+    generated = [body for endpoint, body in calls if endpoint == '/generate']
+    assert generated[-1]['model'] == 'gemini-flash' and generated[-1]['transcript'].endswith('Последняя тема.')
+    assert len(generated[-1]['transcript']) > 140_000
+    assert generated[-1]['slideImages'] == [{'page': 1, 'jpeg': '/9j/2Q=='}]
+    login(c, 'reader')
+    metadata['courseId'] = course(c)
+    assert c.post('/api/jobs', data={'metadata': json.dumps(metadata)}).status_code == 404
+
+
+def test_editor_storage_limit_applies_to_new_owner_bytes(env):
+    c, settings, _, _ = env
+    cid = course(c, 'shared')
+    share(c, cid, 'editor')
+    document = note(c, cid)
+    url = '/api/notes/' + document['id'] + '/assets'
+    png = b'\x89PNG\r\n\x1a\nimage'
+    assert c.put('/api/storage/editor-limit', json={'percent': 0}).status_code == 200
+    c.post(url, files={'file': ('owner.png', png)}).raise_for_status()
+    login(c, 'reader')
+    assert c.post(url, files={'file': ('same.png', png)}).status_code == 201
+    assert c.post(url, files={'file': ('new.png', png + b'2')}).status_code == 507
+    login(c)
+    usage = c.get('/api/storage').raise_for_status().json()
+    assert usage['used'] == len(png) and usage['editorUsed'] == 0
+    assert len(usage['groups']) == 1 and len(usage['groups'][0]) == 2
+
+
+def test_cli_job_leaves_other_accounts_a_worker_slot(env):
+    from backend.db import uid
+    c, settings, author, reader = env
+    cid = course(c, 'shared')
+    share(c, cid, 'editor')
+    active, same_sender, other_sender = uid(), uid(), uid()
+    with connect(settings) as db:
+        db.executemany('INSERT INTO jobs(id,course_id,created_by,payload,status,created_at) VALUES (?,?,?,?,?,?)', [
+            (active, cid, author['id'], '{"mode":"real","provider":"codex"}', 'generating', 1),
+            (same_sender, cid, author['id'], '{"mode":"real","provider":"openai"}', 'queued', 2),
+            (other_sender, cid, reader['id'], '{"mode":"real","provider":"openai"}', 'queued', 3),
+        ])
+    assert claim(settings)['id'] == other_sender
+    with connect(settings) as db:
+        db.execute("UPDATE jobs SET status='ready' WHERE id=?", (active,))
+        db.execute("UPDATE jobs SET status='generating' WHERE id=?", (other_sender,))
+    assert claim(settings)['id'] == same_sender
+
+
+def test_four_sources_are_transcribed_while_one_cli_note_is_generating(env, monkeypatch):
+    from backend import worker
+    c, settings, _, _ = env
+    cid = course(c)
+
+    def fake_rpc(_settings, _service, endpoint, body, **_kwargs):
+        if endpoint == '/providers/status':
+            return {'providers': [{'id': 'codex', 'connected': True, 'models': [{'id': 'codex-fixture', 'efforts': []}]}]}
+        if endpoint == '/transcribe':
+            return {'text': 'Учебная расшифровка ' + body['jobId']}
+        assert endpoint == '/generate'
+        return {'markdown': '## Результат\n\n' + body['transcript']}
+
+    monkeypatch.setattr(worker, 'rpc', fake_rpc)
+    ids = [job(c, cid, mode='real', files={'video': ('video.mp4', b'0000ftypmp42' + bytes([i]))})
+           .raise_for_status().json()['id'] for i in range(4)]
+    worker.run_recognition(settings, claim(settings, 'speech'))
+    first = claim(settings, 'generation')
+    assert first['id'] == ids[0]
+    worker.set_stage(settings, first['id'], 'generating')
+    for other in ids[1:]:
+        next_source = claim(settings, 'speech')
+        assert next_source['id'] == other
+        worker.run_recognition(settings, next_source)
+        queued = c.get('/api/jobs/' + other).raise_for_status().json()
+        assert queued['status'] == 'waiting_generation' and queued['transcriptAssetId']
+        assert claim(settings, 'generation') is None
+    worker.run_job(settings, first)
+    assert c.get('/api/jobs/' + ids[0]).json()['status'] == 'ready'
+    assert not c.get('/api/jobs/' + ids[0]).json().get('transcriptReused')
+    c.post('/api/jobs/' + ids[1] + '/cancel').raise_for_status()
+    assert claim(settings, 'generation')['id'] == ids[2]
 
 
 def test_queue_cancel_retry_interruption_and_no_duplicates(env):
@@ -248,6 +368,34 @@ def test_explicit_import_is_private_validated_idempotent_and_preserves_text(env)
         assert c.post('/api/import', json=data).status_code == 422
     assert c.get('/api/state').json() == before
     login(c, 'reader'); assert c.get('/api/notes/' + n['id']).status_code == 404
+
+
+def test_markdown_file_import_respects_category_permissions_and_preserves_source(env):
+    c, _, _, reader = env
+    cid = course(c, 'shared'); share(c, cid)
+    c.post(f'/api/courses/{cid}/folders', json={'name': 'Семинары'}).raise_for_status()
+    source = '\ufeff# Доказательство\r\n\r\n$$E=mc^2$$\r\n'
+    document = {'title': 'Доказательство', 'markdown': source}
+    payload = {'courseId': cid, 'category': 'Семинары', 'documents': [document, document]}
+    endpoint = '/api/notes/import-markdown'
+    assert c.post(endpoint, json={**payload, 'category': 'Удалённая'}).status_code == 404
+    login(c, 'reader')
+    assert c.post(endpoint, json=payload).status_code == 403
+    login(c)
+    c.put(f'/api/courses/{cid}/members/{reader["id"]}', json={'role': 'editor'}).raise_for_status()
+    login(c, 'reader')
+    result = c.post(endpoint, json=payload).raise_for_status().json()['documents']
+    assert [row['status'] for row in result] == ['imported', 'existing']
+    assert result[0]['id'] == result[1]['id']
+    note_url = '/api/notes/' + result[0]['id']
+    assert c.get(note_url + '/export').content == source.encode('utf-8')
+    assert c.get(note_url).json()['createdBy'] == reader['id']
+    assert c.post(endpoint, json=payload).raise_for_status().json()['documents'][0]['status'] == 'existing'
+    assert c.post(endpoint, json={**payload, 'documents': [dict(title='Другое название', markdown=source),
+                                                          dict(title='Пусто', markdown='\n ')]}).status_code == 422
+    assert len(c.get('/api/state').json()['notes']) == 1
+    same_title = c.post(endpoint, json={**payload, 'documents': [{**document, 'markdown': '# Новое содержание'}]}).raise_for_status()
+    assert same_title.json()['documents'][0]['status'] == 'imported'
 
 
 def test_note_course_and_account_deletion_preserves_other_users_data(env):
@@ -509,3 +657,72 @@ def test_slide_placement_follows_explanation_and_preserves_code_examples():
     assert embed_slides('## Раздел\n\nТекст.', 'asset', 9, None) == '## Раздел\n\nТекст.'
     assert '![Слайд' not in embed_slides(doc, 'asset', 3, 0)
     assert embed_slides(doc, 'asset', 3, 1).count('![Слайд') == 1
+
+
+def test_shared_note_authorship_and_attachment_permissions(env):
+    c, _, author, editor = env
+    cid = course(c, 'shared')
+    owner_note = note(c, cid)
+    share(c, cid, 'editor')
+    login(c, 'reader')
+    editor_note = note(c, cid)
+    own_path = '/api/notes/' + editor_note['id']
+    owner_path = '/api/notes/' + owner_note['id']
+    assert editor_note['createdBy'] == editor['id']
+    assert c.get(owner_path).json()['createdBy'] == author['id']
+    assert c.delete(owner_path).status_code == 403
+
+    login(c)
+    image = b'\x89PNG\r\n\x1a\nsynthetic'
+    asset = c.post(own_path + '/assets', files={'file': ('x.png', image, 'image/png')})
+    assert asset.status_code == 201, asset.text
+    url = asset.json()['url']
+    markdown = f'![Иллюстрация]({url})'
+    c.patch(own_path, json={'title': 'Заметка редактора', 'markdown': markdown, 'revision': 1}).raise_for_status()
+
+    login(c, 'reader')
+    assert c.patch(own_path, json={'title': 'Редактор', 'markdown': '', 'revision': 2}).status_code == 403
+    assert c.post(own_path + '/revisions/1/restore', json={'revision': 2}).status_code == 403
+    c.patch(own_path, json={'title': 'Правки редактора', 'markdown': markdown + '\n\nТекст.', 'revision': 2}).raise_for_status()
+    c.delete(own_path).raise_for_status()
+    assert c.get(own_path).status_code == 404
+    assert c.get(url).content == image
+    second = note(c, cid)
+
+    login(c)
+    c.delete('/api/notes/' + second['id']).raise_for_status()
+
+
+def test_note_history_restores_attachments_and_retains_recent_versions(env):
+    c, _, _, _ = env
+    cid = course(c, 'shared')
+    original = note(c, cid)
+    path = '/api/notes/' + original['id']
+    assert c.get(path + '/revisions').json() == {'revision': 1, 'versions': []}
+    upload = c.post(path + '/assets', files={'file': ('x.png', b'\x89PNG\r\n\x1a\nsynthetic', 'image/png')})
+    upload.raise_for_status()
+    asset = upload.json()
+    attached = f"![Иллюстрация]({asset['url']})"
+    c.patch(path, json={'title': 'С иллюстрацией', 'markdown': attached, 'revision': 1}).raise_for_status()
+    c.patch(path, json={'title': 'Новая правка', 'markdown': 'Один текст', 'revision': 2}).raise_for_status()
+    assert c.delete('/api/storage/assets/' + asset['id']).status_code == 409
+    history = c.get(path + '/revisions').json()
+    assert history['revision'] == 3
+    assert [version['revision'] for version in history['versions']] == [2, 1]
+    assert c.get(path + '/revisions/2').json() == {'title': 'С иллюстрацией', 'markdown': attached}
+    assert c.post(path + '/revisions/2/restore', json={'revision': 2}).status_code == 409
+    result = c.post(path + '/revisions/2/restore', json={'revision': 3})
+    result.raise_for_status()
+    assert result.json()['revision'] == 4 and result.json()['markdown'] == attached
+    assert c.get(asset['url']).status_code == 200
+    for revision in range(4, 26):
+        c.patch(path, json={'title': f'Версия {revision + 1}', 'markdown': '', 'revision': revision}).raise_for_status()
+    versions = c.get(path + '/revisions').json()['versions']
+    assert [version['revision'] for version in versions] == list(range(25, 5, -1))
+    assert c.get(path + '/revisions/2').status_code == 404
+    c.delete('/api/storage/assets/' + asset['id']).raise_for_status()
+    share(c, cid, 'viewer')
+    login(c, 'reader')
+    assert c.get(path + '/revisions').status_code == 403
+    assert c.get(path + '/revisions/25').status_code == 403
+    assert c.post(path + '/revisions/25/restore', json={'revision': 26}).status_code == 403

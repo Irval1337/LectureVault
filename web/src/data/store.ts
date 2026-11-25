@@ -60,6 +60,17 @@ async function refresh(force = false) {
   return refreshing
 }
 
+async function changeNote(id: string, endpoint: string, method: 'PATCH' | 'POST', body: object) {
+  const owner = session.user?.id
+  const note = await api<Note>(endpoint, { method, body: JSON.stringify(body) })
+  if (session.user?.id !== owner) return note
+  const loaded = { ...note, contentLoaded: true }
+  noteCache.set(note.id, loaded)
+  state = { ...state, notes: state.notes.map(item => item.id === id ? { ...loaded, category: item.category } : item) }; emit()
+  await refresh(true)
+  return note
+}
+
 export const auth = {
   subscribe,
   getSnapshot: () => session,
@@ -147,15 +158,11 @@ export const library = {
     if (!state.expandedCourses.includes(courseId)) library.toggleCourse(courseId)
     return note
   },
-  async saveNote(id: string, title: string, markdown: string, revision: number) {
-    const owner = session.user?.id
-    const note = await api<Note>(`/notes/${id}`, { method: 'PATCH', body: JSON.stringify({ title, markdown, revision }) })
-    if (session.user?.id !== owner) return note
-    const loaded = { ...note, contentLoaded: true }
-    noteCache.set(note.id, loaded)
-    state = { ...state, notes: state.notes.map(item => item.id === id ? { ...loaded, category: item.category } : item) }; emit()
-    await refresh(true)
-    return note
+  saveNote(id: string, title: string, markdown: string, revision: number) {
+    return changeNote(id, `/notes/${id}`, 'PATCH', { title, markdown, revision })
+  },
+  restoreNote(id: string, version: number, revision: number) {
+    return changeNote(id, `/notes/${id}/revisions/${version}/restore`, 'POST', { revision })
   },
   async createJob(input: JobInput, video?: File, pdf?: File, progress?: (percent: number) => void) {
     const owner = session.user?.id
@@ -177,6 +184,13 @@ export const library = {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return
     await api('/import', { method: 'POST', body: raw }); await refresh(true)
+  },
+  async importMarkdown(body: string, courseId: string) {
+    const owner = session.user?.id
+    const { documents } = await api<{ documents: { id: string; title: string; status: 'imported' | 'existing' }[] }>('/notes/import-markdown', { method: 'POST', body })
+    await refresh(true)
+    if (owner === session.user?.id && !state.expandedCourses.includes(courseId)) library.toggleCourse(courseId)
+    return documents
   },
   hasLegacy() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}').courses?.length > 0 } catch { return false } },
   toggleCourse(id: string) { state = { ...state, expandedCourses: state.expandedCourses.includes(id) ? state.expandedCourses.filter(v => v !== id) : [...state.expandedCourses, id] }; savePreferences() },

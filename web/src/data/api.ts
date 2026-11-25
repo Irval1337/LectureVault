@@ -25,7 +25,7 @@ export function uploadJob(body: FormData, progress: (percent: number) => void): 
     request.onload = () => {
       if (request.status === 201 && request.response?.id) return resolve(request.response)
       const detail = request.response?.detail
-      reject(new ApiError(detail?.message || (typeof detail === 'string' ? detail : 'Не удалось загрузить материалы.'), request.status, detail?.field))
+      reject(new ApiError(detail?.message || (typeof detail === 'string' ? detail : 'Не удалось загрузить материалы.'), request.status, detail?.field, detail?.code))
     }
     request.onerror = () => reject(new ApiError('Соединение прервалось. Повторите загрузку.', 0))
     request.send(body)

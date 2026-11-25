@@ -7,34 +7,20 @@ export function ReaderOverflow({ children, content }: { children: ReactNode; con
     const host = root.current!
     let frame = 0
     let disposed = false
-    const tracked = new Map<HTMLElement, () => void>()
+    const tracked = new Map<HTMLElement, { cleanup: () => void; setOverflow: (value: boolean) => void }>()
     const restore = (element: HTMLElement, name: string, value: string | null) => {
       if (value === null) element.removeAttribute(name)
       else element.setAttribute(name, value)
     }
     const refresh = () => {
-      for (const [element, cleanup] of tracked) {
-        if (!host.contains(element)) { cleanup(); tracked.delete(element); continue }
-        const overflows = element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1
-        element.toggleAttribute('data-horizontal-scroll', overflows)
-        if (overflows) {
-          element.tabIndex = 0
-          element.setAttribute('role', 'region')
-          const kind = element.classList.contains('table-container') ? 'Таблица' : ['PRE', 'CODE'].includes(element.tagName) ? 'Код' : 'Формула'
-          element.setAttribute('aria-label', `${kind}: горизонтальная прокрутка`)
-          const left = element.scrollLeft > 1
-          const right = element.scrollLeft + element.clientWidth < element.scrollWidth - 1
-          element.dataset.scrollHint = `${left ? '← ' : ''}Горизонтальная прокрутка${right ? ' →' : ''}`
-        } else {
-          element.removeAttribute('data-scroll-hint')
-          element.dispatchEvent(new Event('reader-scroll-fit'))
-        }
+      for (const [element, observer] of tracked) {
+        if (!host.contains(element)) { observer.cleanup(); tracked.delete(element); continue }
+        observer.setOverflow(element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1)
       }
     }
     const schedule = () => {
       if (disposed) return
-      cancelAnimationFrame(frame)
-      frame = requestAnimationFrame(refresh)
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; refresh() })
     }
     const resize = new ResizeObserver(schedule)
     const scan = () => {
@@ -43,6 +29,17 @@ export function ReaderOverflow({ children, content }: { children: ReactNode; con
         if (tracked.has(element)) return
         const original = ['role', 'aria-label', 'tabindex'].map(name => element.getAttribute(name))
         const fit = () => ['role', 'aria-label', 'tabindex'].forEach((name, index) => restore(element, name, original[index]))
+        const kind = element.classList.contains('table-container') ? 'Таблица' : ['PRE', 'CODE'].includes(element.tagName) ? 'Код' : 'Формула'
+        const child = element.firstElementChild
+        const setOverflow = (value: boolean) => {
+          if (value === element.hasAttribute('data-horizontal-scroll')) return
+          element.toggleAttribute('data-horizontal-scroll', value)
+          if (value) {
+            element.tabIndex = 0
+            element.setAttribute('role', 'region')
+            element.setAttribute('aria-label', `${kind}: горизонтальная прокрутка`)
+          } else fit()
+        }
         const key = (event: KeyboardEvent) => {
           if (event.target !== element || !element.hasAttribute('data-horizontal-scroll')) return
           if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
@@ -50,21 +47,15 @@ export function ReaderOverflow({ children, content }: { children: ReactNode; con
             element.scrollBy({ left: event.key === 'ArrowRight' ? 80 : -80 })
           }
         }
-        element.addEventListener('scroll', schedule, { passive: true })
         element.addEventListener('keydown', key)
-        element.addEventListener('reader-scroll-fit', fit)
         resize.observe(element)
-        if (element.firstElementChild) resize.observe(element.firstElementChild)
-        tracked.set(element, () => {
-          fit()
-          element.removeAttribute('data-horizontal-scroll')
-          element.removeAttribute('data-scroll-hint')
-          element.removeEventListener('scroll', schedule)
+        if (child) resize.observe(child)
+        tracked.set(element, { setOverflow, cleanup() {
+          setOverflow(false)
           element.removeEventListener('keydown', key)
-          element.removeEventListener('reader-scroll-fit', fit)
           resize.unobserve(element)
-          if (element.firstElementChild) resize.unobserve(element.firstElementChild)
-        })
+          if (child) resize.unobserve(child)
+        } })
       })
       schedule()
     }
@@ -80,7 +71,7 @@ export function ReaderOverflow({ children, content }: { children: ReactNode; con
       mutation.disconnect()
       resize.disconnect()
       host.removeEventListener('load', schedule, true)
-      tracked.forEach(cleanup => cleanup())
+      tracked.forEach(observer => observer.cleanup())
     }
   }, [content])
   return <div className="reader-overflow-root" ref={root}>{children}</div>
