@@ -131,7 +131,9 @@ test('reader uses rendered headings for links and handles a mobile drawer across
   await page.getByRole('button', { name: 'Оглавление', exact: true }).click()
   await expect(page.locator('.mobile-toc a')).toHaveText(['Определения', 'Вывод'])
   await page.locator('.mobile-toc').getByRole('link', { name: 'Определения' }).click()
-  await expect(page.getByRole('heading', { name: 'Определения', exact: true })).toBeInViewport()
+  const definitions = page.getByRole('heading', { name: 'Определения', exact: true })
+  await expect(definitions).toBeInViewport()
+  await expect.poll(() => definitions.evaluate(element => element.getBoundingClientRect().top)).toBeLessThan(120)
 
   await page.getByRole('button', { name: 'Открыть навигацию' }).click()
   await expect(page.getByRole('dialog', { name: 'Навигация' })).toBeVisible()
@@ -139,6 +141,26 @@ test('reader uses rendered headings for links and handles a mobile drawer across
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.keyboard.press('Control+k')
   await expect(page.locator('.desktop-sidebar').getByLabel('Поиск по библиотеке')).toBeFocused()
+  await page.mouse.move(620, 480)
+  await page.mouse.wheel(0, 760)
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(600)
+  const readingFrames = await page.evaluate(async () => {
+    await document.fonts.ready
+    const samples: { position: number; height: number }[] = []
+    for (let i = 0; i < 30; i++) {
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+      samples.push({ position: window.scrollY, height: document.documentElement.scrollHeight })
+    }
+    return samples
+  })
+  expect(new Set(readingFrames.map(frame => frame.position)).size).toBe(1)
+  expect(new Set(readingFrames.map(frame => frame.height)).size).toBe(1)
+  const readingPosition = readingFrames[0].position
+  await page.locator('.desktop-sidebar .library-nav').getByRole('link', { name: 'Библиотека', exact: true }).click()
+  await page.goBack()
+  await expect(definitions).toBeAttached()
+  await expect.poll(async () => Math.abs(await page.evaluate(() => window.scrollY) - readingPosition)).toBeLessThanOrEqual(12)
+  await capture(page, 'reader-navigation')
 
   await page.goto('/notes/' + code)
   await expect(page.locator('.quartz-reader pre')).toHaveText(/## Это комментарий/)

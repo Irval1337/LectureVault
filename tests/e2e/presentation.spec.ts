@@ -4,6 +4,40 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, expect, signIn, createCourse, headers, capture } from './fixtures'
 
+test('a PDF draft has one remove action and can be attached again after removal', async ({ page, accounts }) => {
+  await signIn(page, accounts.author)
+  const course = await createCourse(page.request, 'Презентации')
+  await page.goto('/new?course=' + course)
+  const attach = page.getByRole('button', { name: 'Добавить презентацию' })
+  const chip = page.locator('.pdf-chip')
+  const original = { name: 'Слайды.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 test') }
+  await page.getByLabel('PDF-презентация').setInputFiles(original)
+  const otherPdf = await page.evaluateHandle(() => {
+    const transfer = new DataTransfer()
+    transfer.items.add(new File(['%PDF-1.4 test'], 'Другая.pdf', { type: 'application/pdf' }))
+    return transfer
+  })
+  await page.locator('.pdf-drop').dispatchEvent('drop', { dataTransfer: otherPdf })
+  await expect(chip).toHaveText(original.name)
+  await capture(page, 'presentation-attachment')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await capture(page, 'presentation-attachment-mobile')
+
+  await page.reload()
+  await expect(chip).toHaveText(original.name)
+  await expect(chip.getByRole('button')).toHaveCount(1)
+  await expect(attach).toHaveCount(0)
+  await page.getByRole('button', { name: 'Создать конспект', exact: true }).click()
+  await expect(page.locator('#pdf-error')).toContainText('Файл презентации недоступен')
+  await chip.getByRole('button', { name: 'Убрать PDF' }).click()
+  await expect(page.locator('#pdf-error')).toHaveCount(0)
+  await expect(page.getByLabel('Иллюстрации в тексте')).toHaveCount(0)
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), attach.click()])
+  await chooser.setFiles({ ...original, name: 'Новые слайды.pdf' })
+  await expect(chip).toHaveText('Новые слайды.pdf')
+  await expect(page.getByLabel('Иллюстрации в тексте')).toBeVisible()
+})
+
 test('video and dropped slides reach Whisper, the compatible API, Markdown and a private paginated reader', async ({ page, accounts, browser }) => {
   test.setTimeout(90000)
   await signIn(page, accounts.author)
@@ -44,6 +78,7 @@ test('video and dropped slides reach Whisper, the compatible API, Markdown and a
   await page.getByRole('button', { name: 'Включить светлую тему' }).click()
   await capture(page, 'light-generation')
   await page.getByRole('button', { name: 'Создать конспект', exact: true }).click()
+  await page.getByRole('link', { name: 'Открыть задание' }).click()
   await expect(page).toHaveURL(/queue\?job=/)
   const progress = page.getByRole('progressbar', { name: 'Распознано аудио' })
   await expect(progress).toBeVisible({ timeout: 30000 })
@@ -58,17 +93,41 @@ test('video and dropped slides reach Whisper, the compatible API, Markdown and a
   await expect(page.locator('.job-item.selected + .inline-job-steps')).toBeVisible()
   const selected = page.locator('.job-item.selected')
   await expect(selected).toContainText('local-study:v2')
+  const transcriptUrl = await selected.getByRole('link', { name: 'Расшифровка', exact: true }).getAttribute('href')
+  const transcript = await page.request.get(transcriptUrl!)
+  expect(transcript.headers()['content-type']).toContain('text/plain')
+  expect((await transcript.text()).trim().length).toBeGreaterThan(10)
+  await expect(selected.locator('.job-actions')).toHaveCSS('gap', '8px')
+  let releaseInline!: () => void
+  const waitForInline = new Promise<void>(resolve => { releaseInline = resolve })
+  await page.route('**/slides/2.jpg', async route => { await waitForInline; await route.continue() })
   await selected.getByRole('link', { name: 'Открыть' }).click({ timeout: 60000 })
+  await expect(page).toHaveURL(/\/notes\//)
+  const notePath = new URL(page.url()).pathname
+  const inline = page.locator('.quartz-reader img[alt="Слайд 2"]')
+  await expect(inline).toBeVisible()
+  const inlineHeight = await inline.evaluate(img => img.getBoundingClientRect().height)
+  expect(inlineHeight).toBeGreaterThan(100)
+  releaseInline()
+  await expect.poll(() => inline.evaluate(img => (img as HTMLImageElement).naturalWidth)).toBeGreaterThan(100)
+  expect(await inline.evaluate(img => img.getBoundingClientRect().height)).toBe(inlineHeight)
   const gallery = page.getByRole('region', { name: 'Слайды презентации' })
   let allowSlide!: () => void
+  let allowMetadata!: () => void
   const gate = new Promise<void>(resolve => { allowSlide = resolve })
+  const metadata = new Promise<void>(resolve => { allowMetadata = resolve })
   await page.route('**/slides/1.jpg', async route => { await gate; await route.continue() })
-  await gallery.getByRole('button', { name: 'Показать все слайды' }).click()
+  await page.route('**/slides', async route => { await metadata; await route.continue() })
+  await page.getByRole('link', { name: 'Презентация', exact: true }).click()
   const frame = gallery.locator('.slide-frame')
   await expect(frame).toBeVisible()
   const reserved = await frame.evaluate(el => el.clientHeight)
   expect(reserved).toBeGreaterThan(100)
   allowSlide()
+  await expect.poll(() => frame.locator('img').evaluate(el => (el as HTMLImageElement).naturalWidth)).toBeGreaterThan(100)
+  await expect(gallery.getByLabel('Номер слайда')).toBeDisabled()
+  allowMetadata()
+  await expect(gallery.getByLabel('Номер слайда')).toBeEnabled()
   const image = gallery.getByRole('img', { name: 'Слайд 1 из 2' })
   await image.scrollIntoViewIfNeeded()
   await expect.poll(() => image.evaluate(el => (el as HTMLImageElement).naturalWidth)).toBeGreaterThan(100)
@@ -80,7 +139,6 @@ test('video and dropped slides reach Whisper, the compatible API, Markdown and a
   await expect(gallery.getByRole('button', { name: 'Следующий слайд' })).toBeDisabled()
   await gallery.getByLabel('Номер слайда').selectOption('1')
   await expect(gallery.getByRole('img', { name: 'Слайд 1 из 2' })).toBeVisible()
-  const inline = page.locator('.quartz-reader img[alt="Слайд 2"]')
   await expect(inline).toHaveCount(1)
   const src = await inline.getAttribute('src')
   const exported = await page.request.get((await page.getByRole('link', { name: 'Скачать .md' }).getAttribute('href'))!)
@@ -95,6 +153,8 @@ test('video and dropped slides reach Whisper, the compatible API, Markdown and a
       await page.getByRole('tab',{name:'Материалы'}).click()
       const details = page.locator('.context-sidebar .source-details')
       for (const option of ['Английский','750 слов','local-study:v2','до 3']) await expect(details).toContainText(option)
+      await expect(details.getByRole('link', { name: 'Скачать TXT' })).toHaveAttribute('href', transcriptUrl!)
+      await expect(details.getByRole('link', { name: 'Репликация.mp4' })).toHaveCount(0)
     }
     await capture(page, 'light-slides-' + width)
   }
@@ -104,10 +164,51 @@ test('video and dropped slides reach Whisper, the compatible API, Markdown and a
   await page.reload()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
   await expect(page.getByRole('textbox', { name: 'Текст заметки' })).toBeVisible()
+
+  await page.goto('/courses/' + course)
+  await page.getByRole('link', { name: 'Хранилище', exact: true }).click()
+  await expect(page).toHaveURL(/\/settings\?course=.*#storage/)
+  await expect(page.getByRole('progressbar', { name: 'Использовано хранилища' })).toBeVisible()
+  const types = page.getByRole('combobox', { name: 'Тип файла' })
+  const stored = page.locator('.storage-files')
+  await expect(stored).toContainText('Репликация.txt')
+  await expect(stored).toContainText('Репликация.pdf')
+  await expect(stored).not.toContainText('Репликация.mp4')
+  await page.getByRole('combobox', { name: 'Категория', exact: true }).selectOption('')
+  await expect(page).toHaveURL(/\/settings#storage/)
+  await capture(page, 'storage-mobile')
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await capture(page, 'storage-desktop')
+  await types.selectOption('transcript')
+  await expect(stored.getByRole('listitem')).toHaveCount(1)
+  await stored.getByRole('link', { name: 'Создать конспект' }).click()
+  await expect(page).toHaveURL(/\/new\?fromJob=/)
+  await expect(page.getByText('Готовая расшифровка', { exact: false })).toBeVisible()
+  await expect(page.getByLabel('Ориентир в словах')).toHaveValue('750')
+  await expect(page.getByLabel('Модель', { exact: true })).toHaveValue('local-study:v2')
+  await page.getByLabel('Название', { exact: true }).fill('Репликация · новый конспект')
+  await page.getByLabel('Провайдер', { exact: true }).selectOption('codex')
+  await page.getByRole('link', { name: 'Подключить в настройках' }).click()
+  await page.getByRole('link', { name: 'Вернуться к конспекту' }).click()
+  await expect(page).toHaveURL(/\/new\?fromJob=/)
+  await expect(page.getByLabel('Название', { exact: true })).toHaveValue('Репликация · новый конспект')
+  await page.getByLabel('Провайдер', { exact: true }).selectOption('openai')
+  await page.getByRole('button', { name: 'Создать конспект', exact: true }).click()
+  await page.getByRole('link', { name: 'Открыть задание' }).click()
+  await expect(page).toHaveURL(/queue\?job=/)
+  await expect(page.locator('.job-item.selected').getByRole('link', { name: 'Открыть' })).toBeVisible()
+  await expect(page.locator('.job-item.selected').getByRole('link', { name: 'Расшифровка' })).toHaveAttribute('href', transcriptUrl!)
+  await page.goto('/settings#storage')
+  await types.selectOption('transcript')
+  await stored.getByRole('button', { name: 'Удалить', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Удалить файл' }).click()
+  await expect(page.getByText('По выбранным фильтрам файлов нет.')).toBeVisible()
+  expect((await page.request.get(transcriptUrl!)).status()).toBe(404)
+  expect((await page.request.get('/api' + notePath)).ok()).toBe(true)
   await page.request.post('/api/providers/openai/disconnect', { headers, data: {} })
 })
 
-test('two lectures from one account reach the compatible API concurrently', async ({page, accounts}) => {
+test('four lectures finish transcription while two generation slots are occupied', async ({page, accounts}) => {
   test.setTimeout(90000)
   await signIn(page, accounts.author)
   const courseId = await createCourse(page.request, 'Параллельные лекции')
@@ -115,22 +216,47 @@ test('two lectures from one account reach the compatible API concurrently', asyn
   expect((await page.request.post('/api/providers/openai/key', {headers, data:{baseUrl, apiKey:''}})).ok()).toBe(true)
   const temp = await mkdtemp(join(tmpdir(), 'lecturevault-parallel-'))
   try {
-    const file = join(temp,'lecture.mp4')
-    execFileSync('ffmpeg', ['-nostdin','-v','error','-f','lavfi','-i','flite=text=Today we will study the replication of data across three different computers.','-c:a','aac',file])
-    const buffer = await readFile(file)
-    const jobs = await Promise.all([1,2].map(async index => {
-      const title = 'Параллельная проверка ' + index
+    const recordings = [
+      'Today we will study the replication of data across three different computers.',
+      'A transaction can commit after two replicas have acknowledged that they received the record.',
+    ]
+    const buffers = await Promise.all(recordings.map(async (speech, index) => {
+      const file = join(temp, `lecture-${index}.mp4`)
+      execFileSync('ffmpeg', ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i', `flite=text=${speech}`, '-c:a', 'aac', file])
+      return readFile(file)
+    }))
+    const jobs = await Promise.all([0, 1, 2, 3].map(async index => {
+      const title = 'Параллельная проверка ' + (index + 1)
       const res = await page.request.post('/api/jobs', { headers, multipart: {
         metadata:JSON.stringify({courseId,title,sourceType:'file',sourceName:'lecture.mp4',mode:'real',provider:'openai',apiBase:baseUrl,model:'local-study:v2',language:'en',targetWords:750}),
-        video:{name:'lecture.mp4',mimeType:'video/mp4',buffer}
+        video:{name:'lecture.mp4',mimeType:'video/mp4',buffer: buffers[index % buffers.length]}
       }})
       expect(res.status()).toBe(201)
       return (await res.json()).id
     }))
-    // The endpoint releases either response only after both generation requests arrive.
-    await expect.poll(async () => Promise.all(jobs.map(async id => (await (await page.request.get('/api/jobs/'+id)).json()).status)), {timeout:60000}).toEqual(['ready','ready'])
-    const completed = await Promise.all(jobs.map(async id => (await page.request.get('/api/jobs/'+id)).json()))
-    expect(completed.filter(job => job.transcriptReused)).toHaveLength(1)
+    const readJobs = () => Promise.all(jobs.map(async id => (await page.request.get('/api/jobs/' + id)).json()))
+    await page.goto('/queue')
+    await expect.poll(async () => {
+      const current = await readJobs()
+      return current.map(job => job.transcriptAssetId ? job.status : 'without transcript').sort()
+    }, {timeout: 25000}).toEqual(['generating', 'generating', 'waiting_generation', 'waiting_generation'])
+    const waiting = page.locator('.job-item').filter({ hasText: 'Параллельная проверка' }).locator('.job-status')
+      .filter({ hasText: 'Расшифровка готова · ждёт генерации' })
+    await expect(waiting).toHaveCount(2, {timeout: 10000})
+    await expect.poll(async () => (await readJobs()).map(job => job.status), {timeout: 60000}).toEqual(Array(4).fill('ready'))
+    const completed = await readJobs()
+    expect(completed.filter(job => job.transcriptReused)).toHaveLength(2)
+    expect((await page.request.delete('/api/notes/' + completed[0].noteId, { headers })).ok()).toBe(true)
+    await page.goto('/queue?job=' + jobs[0])
+    const removed = page.locator('.job-item.selected')
+    await expect(removed.locator('.job-status')).toHaveText('Конспект удалён')
+    await expect(removed.getByRole('link', { name: 'Расшифровка' })).toBeVisible()
+    await expect(removed.getByRole('link', { name: 'Открыть' })).toHaveCount(0)
+    await capture(page, 'queue-attachments-desktop')
+    await page.setViewportSize({ width: 390, height: 844 })
+    await capture(page, 'queue-attachments-mobile')
+    await page.getByRole('tab', { name: /Готовые/ }).click()
+    await expect(page.getByText('Конспект удалён')).toHaveCount(0)
   } finally {
     await rm(temp,{recursive:true,force:true})
     await page.request.post('/api/providers/openai/disconnect',{headers,data:{}})

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { Link, NavLink } from 'react-router-dom'
+import { Link, NavLink, useLocation } from 'react-router-dom'
 import { Settings2 } from 'lucide-react'
 import { api, ApiError } from '../data/api'
 import { PROVIDER_NAMES, type ProviderId } from '../data/model'
@@ -7,10 +7,11 @@ import { Button } from './ui/button'
 import { Dialog } from './ui/dialog'
 import { useSession } from '../data/store'
 
-export type Provider = { id: ProviderId; name: string; connected: boolean; managedBy?: string; baseUrl?: string; catalogError?: string; models: { id: string; name: string; efforts: string[] }[]; login: { status: string; url?: string; userCode?: string } }
+export type Provider = { id: ProviderId; name: string; connected: boolean; managedBy?: string; baseUrl?: string; catalogError?: string; models: { id: string; name: string; efforts: string[]; supportsImages?: boolean }[]; login: { status: string; url?: string; userCode?: string } }
 export type GenerationOptions = { apiBase?: string; provider: ProviderId; model: string; effort: 'low' | 'medium' | 'high' | 'xhigh' }
 export const defaultGeneration: GenerationOptions = { provider: 'codex', model: '', effort: 'medium' }
 const endpoints = ['https://api.openai.com/v1', 'https://api.anthropic.com/v1', 'https://generativelanguage.googleapis.com/v1beta/openai', 'http://host.docker.internal:11434/v1']
+const endpointNames = ['OpenAI', 'Anthropic', 'Gemini', 'Ollama']
 
 export function ProviderConnections({ small = false, account = false }: { small?: boolean; connectProvider?: Provider['id']; account?: boolean }) {
   const session = useSession()
@@ -67,6 +68,17 @@ export function ConnectionSettings() {
     setError(''); setNotice(''); setApiKey(''); setBaseUrl(provider.baseUrl || endpoints[0]); setWorkspace(''); setActiveDialog(provider.id)
     if (provider.id === 'codex' && !['starting', 'waiting'].includes(provider.login.status)) void action('codex', 'connect')
   }
+  const refreshModels = async () => {
+    setBusy('refresh'); setError(''); setNotice('')
+    try {
+      const result = await api<{ providers: Provider[] }>('/providers?refresh=true')
+      setProviders(result.providers)
+      const catalogError = result.providers.find(provider => provider.id === 'openai')?.catalogError
+      if (catalogError) setError(catalogError)
+      else setNotice('Список моделей обновлён.')
+    } catch (error) { setError((error as Error).message) }
+    finally { setBusy('') }
+  }
   const confirmPassword = async (event: FormEvent) => {
     event.preventDefault(); setBusy('reauth'); setError('')
     try {
@@ -89,7 +101,7 @@ export function ConnectionSettings() {
         </div>
         <p className="provider-description">{provider.id === 'codex' ? 'Аккаунт ChatGPT' : provider.id === 'claude' ? (provider.managedBy ? 'Использует ключ из «Свой API»' : 'Ключ Anthropic API') : provider.baseUrl || 'OpenAI, Claude, Gemini или локальная модель'}</p>
         {provider.managedBy ? <Button size="sm" variant="ghost" onClick={() => { const owner = providers.find(p => p.id === provider.managedBy); if (owner) openConnection(owner) }}>Настроить ключ</Button> : provider.connected
-          ? <div className="provider-actions">{provider.id === 'openai' && <Button size="sm" variant="outline" disabled={!!busy} onClick={() => openConnection(provider)}>Изменить</Button>}<Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { if (window.confirm(`Отключить ${provider.id === 'openai' ? 'API' : provider.name}?`)) void action(provider.id, 'disconnect') }}>Отключить</Button></div>
+          ? <div className="provider-actions">{provider.id === 'openai' && <><Button size="sm" variant="outline" disabled={!!busy} onClick={() => openConnection(provider)}>Изменить</Button><Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void refreshModels()}>{busy === 'refresh' ? 'Обновляем…' : 'Обновить модели'}</Button></>}<Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { if (window.confirm(`Отключить ${provider.id === 'openai' ? 'API' : provider.name}?`)) void action(provider.id, 'disconnect') }}>Отключить</Button></div>
           : <Button size="sm" variant="outline" disabled={!!busy || provider.login.status === 'unavailable'} onClick={() => openConnection(provider)} aria-label={provider.id === 'openai' ? 'Подключить API' : `Подключить ${provider.name}`}>
             {provider.id === 'codex' && waiting ? 'Продолжить вход' : 'Подключить'}
           </Button>}
@@ -109,9 +121,15 @@ export function ConnectionSettings() {
         <div className="dialog-actions"><Button variant="ghost" disabled={!!busy} onClick={() => void action('codex', 'disconnect')}>Отменить вход</Button></div>
       </>}
       {(activeDialog === 'openai' || activeDialog === 'claude') && <form className="provider-key-form" onSubmit={event => { event.preventDefault(); void action(activeDialog, 'key', apiKey.trim()) }}>
-        {activeDialog === 'openai' && <><label className="field-label" htmlFor="provider-base">Адрес API (Base URL)</label>
-        <input id="provider-base" type="url" list="api-endpoints" value={baseUrl} onChange={event => { setBaseUrl(event.target.value); setApiKey('') }} maxLength={500} required />
-        <datalist id="api-endpoints">{endpoints.map((url,index) => <option key={url} value={url}>{['OpenAI','Anthropic','Gemini','Ollama'][index]}</option>)}</datalist></>}
+        {activeDialog === 'openai' && <>
+          <label className="field-label" htmlFor="provider-service">Сервис</label>
+          <select id="provider-service" value={endpoints.includes(baseUrl.replace(/\/+$/, '')) ? baseUrl.replace(/\/+$/, '') : ''} onChange={event => { setBaseUrl(event.target.value); setApiKey('') }}>
+            {endpoints.map((url, index) => <option key={url} value={url}>{endpointNames[index]}</option>)}
+            <option value="">Другой сервер</option>
+          </select>
+          <label className="field-label" htmlFor="provider-base">Адрес API (Base URL)</label>
+          <input id="provider-base" type="url" value={baseUrl} onChange={event => { setBaseUrl(event.target.value); setApiKey('') }} maxLength={500} required />
+        </>}
         <label className="field-label" htmlFor="provider-api-key">API-ключ</label>
         <input id="provider-api-key" type="password" value={apiKey} autoComplete="off" spellCheck={false} maxLength={512} onChange={event => setApiKey(event.target.value)} />
         {activeDialog === 'openai' && baseUrl.startsWith('http://') && <p className="field-hint">Для локального сервера без авторизации оставьте ключ пустым. Адрес должен быть разрешён владельцем LectureVault.</p>}
@@ -127,6 +145,7 @@ export function ConnectionSettings() {
 }
 
 export function ProviderOptions({ value, onChange, onAvailabilityChange }: { value: GenerationOptions; onChange: (value: GenerationOptions) => void; onAvailabilityChange?: (available: boolean) => void }) {
+  const location = useLocation()
   const [providers, setProviders] = useState<Provider[]>([])
   const [error, setError] = useState('')
   useEffect(() => { void api<{ providers: Provider[] }>('/providers').then(result => setProviders(result.providers)).catch(error => setError(error.message)) }, [])
@@ -148,7 +167,7 @@ export function ProviderOptions({ value, onChange, onAvailabilityChange }: { val
         const next = providers.find(item => item.id === event.target.value)
         if (next) onChange({ provider: next.id, apiBase: next.baseUrl, model: next.models[0]?.id ?? '', effort: 'medium' })
       }}>{providers.length ? providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>) : <option>{PROVIDER_NAMES[value.provider]}</option>}</select>
-      {provider && !provider.connected && <p className="field-hint"><Link to="/settings#connections" state={{ fromGeneration: true }}>Подключить в настройках</Link></p>}
+      {provider && !provider.connected && <p className="field-hint"><Link to="/settings#connections" state={{ fromGeneration: true, generationSearch: location.search }}>Подключить в настройках</Link></p>}
       {provider?.baseUrl && <p className="field-hint">{provider.baseUrl}</p>}
     </div>
     {provider?.connected && <div className="provider-model-effort"><div><label className="field-label" htmlFor="generation-model">Модель</label>

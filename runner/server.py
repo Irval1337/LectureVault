@@ -10,13 +10,21 @@ from functools import lru_cache, wraps
 import threading
 import tempfile
 import sys
+import wave
+import time
+from collections import OrderedDict
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from backend import transcript as transcription
 from .common import auth, fail, run as run_process
 
 KIND = os.environ.get('RUNNER_KIND', 'media')
 JOBS = Path('/jobs')
+WHISPER_MODEL = os.environ.get('WHISPER_MODEL', '/opt/models/ggml-base.bin')
+WHISPER_VAD = '/opt/models/ggml-silero-v5.1.2.bin'
+MAX_TRANSCRIPT_CHARS = 1_000_000
+MAX_TRANSCRIPT_BYTES = MAX_TRANSCRIPT_CHARS * 4
 @asynccontextmanager
 async def lifespan(_app):
     from .sandbox import abi
@@ -34,7 +42,7 @@ async def lifespan(_app):
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
 media_lock = threading.Lock()
 
-def run(argv, *, cwd, timeout, on_progress=None, read_file=None):
+def run(argv, *, cwd, timeout, on_progress=None, read_file=None, output_limit=1_000_000):
     # Media parsers see one job only, not the other users' uploaded files.
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -45,7 +53,7 @@ def run(argv, *, cwd, timeout, on_progress=None, read_file=None):
             command.extend(['--read-file', str(read_file)])
         command.extend(argv)
         environment = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': str(home), 'TMPDIR': str(temporary), 'PYTHONPATH': '/app', 'LANG': 'C.UTF-8', 'OMP_NUM_THREADS': '4'}
-        return run_process(command, cwd=cwd, timeout=timeout, env=environment, on_progress=on_progress)
+        return run_process(command, cwd=cwd, timeout=timeout, env=environment, on_progress=on_progress, output_limit=output_limit)
 
 def serialized_media(function):
     @wraps(function)
@@ -56,14 +64,18 @@ def serialized_media(function):
 
 
 def job_file(job_id, filename, source_job_id=None):
-    if not re.fullmatch(r'[0-9a-f-]{36}', job_id) or not re.fullmatch(r'[0-9a-f-]{36}\.(mp4|mov|mkv|webm|pdf)', filename):
+    blob = source_job_id == 'blobs'
+    pattern = r'[a-f0-9]{64}\.pdf' if blob else r'[0-9a-f-]{36}\.(mp4|mov|mkv|webm|pdf)'
+    if not re.fullmatch(r'[0-9a-f-]{36}', job_id) or not re.fullmatch(pattern, filename):
         fail('INVALID_PATH', 'Некорректный идентификатор файла.')
     directory = JOBS / job_id
-    if source_job_id and not re.fullmatch(r'[0-9a-f-]{36}', source_job_id):
+    if source_job_id and not blob and not re.fullmatch(r'[0-9a-f-]{36}', source_job_id):
         fail('INVALID_PATH', 'Некорректный идентификатор файла.')
     path = JOBS / (source_job_id or job_id) / filename
     if directory.is_symlink() or path.parent.is_symlink() or path.is_symlink() or not path.resolve().is_relative_to(JOBS.resolve()) or not path.is_file():
         fail('FILE_MISSING', 'Файл задания недоступен.')
+    if filename.endswith('.pdf'):
+        return None, path
     if not directory.is_dir():
         fail('FILE_MISSING', 'Недоступна папка задания.')
     return directory, path
@@ -91,7 +103,7 @@ def engine_version(operation):
     paths = [__file__, '/var/lib/dpkg/status']
     if operation == 'speech':
         paths += ['/usr/bin/ffprobe', '/usr/bin/ffmpeg', '/opt/whisper/bin/whisper-cli',
-                  os.environ.get('WHISPER_MODEL', '/opt/models/ggml-tiny.bin')]
+                  WHISPER_MODEL, WHISPER_VAD, transcription.__file__]
     else:
         paths += ['/usr/bin/pdfinfo', '/usr/bin/pdftotext', '/usr/bin/pdftoppm']
     digest = hashlib.sha256(operation.encode())
@@ -121,64 +133,126 @@ def cached_output(operation, body, filename, process):
 class MediaInput(MediaRequest):
     video: str = Field(max_length=60)
     language: str = 'ru'
+    prepareAudio: bool = False
+    preparedAudio: str | None = Field(default=None, pattern=r'^[0-9a-f]{64}$')
 
 
 @app.post('/transcribe', dependencies=[Depends(auth)])
 @serialized_media
 def transcribe(body: MediaInput):
-    return cached_output('speech', body, body.video, recognize)
+    if KIND != 'media':
+        raise HTTPException(404)
+    if body.video.endswith('.pdf'):
+        fail('INVALID_PATH', 'Некорректный идентификатор видео.')
+    directory, video = job_file(body.jobId, body.video, body.sourceJobId)
+    with tempfile.TemporaryDirectory(dir=directory) as temporary:
+        scratch = Path(temporary)
+        audio = scratch / 'audio.wav'
+        prepared = directory / 'recognition.wav'
+        if body.preparedAudio:
+            if prepared.is_symlink() or not prepared.is_file():
+                fail('FILE_MISSING', 'Подготовленная звуковая дорожка недоступна.')
+            os.replace(prepared, audio)
+            digest, duration = pcm_identity(audio)
+            if digest != body.preparedAudio:
+                fail('AUDIO_CHANGED', 'Подготовленная звуковая дорожка изменилась.')
+            version = engine_version('speech')
+            return {'text': recognize(body, scratch, audio), 'duration': duration,
+                    'audioSha256': digest, 'engineVersion': version}
+        duration = normalize_audio(scratch, video, audio)
+        if body.prepareAudio:
+            digest, _ = pcm_identity(audio)
+            version = engine_version('speech')
+            os.replace(audio, prepared)
+            return {'audioSha256': digest, 'engineVersion': version, 'duration': duration}
+        return {'text': recognize(body, scratch, audio), 'duration': duration}
 
 
-def recognize(body, directory, video):
+def normalize_audio(directory, video, audio):
     info = json.loads(run(['ffprobe', '-v', 'error', '-protocol_whitelist', 'file,pipe', '-show_entries', 'format=duration', '-of', 'json', str(video)], cwd=directory, timeout=30, read_file=video))
     duration = float(info.get('format', {}).get('duration', 0))
     if not 0 < duration <= 7200:
         fail('DURATION_LIMIT', 'Допустимо видео с длительностью до двух часов.')
-    audio = directory / 'audio.wav'
+    run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-protocol_whitelist', 'file,pipe',
+         '-i', str(video), '-map', '0:a:0', '-map_metadata', '-1', '-vn', '-ac', '1', '-ar', '16000',
+         '-c:a', 'pcm_s16le', '-t', '7200', str(audio)], cwd=directory, timeout=300, read_file=video)
+    return duration
+
+
+def pcm_identity(audio):
+    if audio.is_symlink() or not audio.is_file():
+        fail('INVALID_AUDIO', 'Не удалось подготовить звуковую дорожку.')
+    digest = hashlib.sha256()
+    try:
+        with wave.open(str(audio), 'rb') as stream:
+            frames = stream.getnframes()
+            if ((stream.getnchannels(), stream.getframerate(), stream.getsampwidth()) != (1, 16000, 2)
+                    or not 0 < frames <= 7200 * 16000):
+                fail('INVALID_AUDIO', 'Не удалось подготовить звуковую дорожку.')
+            remaining = frames
+            while remaining:
+                chunk = stream.readframes(min(remaining, 32768))
+                if not chunk or len(chunk) % 2:
+                    fail('INVALID_AUDIO', 'Подготовленная звуковая дорожка повреждена.')
+                digest.update(chunk)
+                remaining -= len(chunk) // 2
+    except (wave.Error, EOFError, OSError):
+        fail('INVALID_AUDIO', 'Не удалось прочитать звуковую дорожку.')
+    return digest.hexdigest(), frames / 16000
+
+
+def recognize(body, directory, audio):
     result = directory / 'transcript'
     output = result.with_suffix('.txt')
-    output.unlink(missing_ok=True)
-    try:
-        run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-protocol_whitelist', 'file,pipe', '-i', str(video), '-vn', '-ac', '1', '-ar', '16000', '-t', '7200', str(audio)], cwd=directory, timeout=300, read_file=video)
-        language = body.language if body.language in ['ru', 'en', 'auto'] else 'ru'
-        def progress(percent):
-            with tempfile.NamedTemporaryFile(dir=directory, delete=False) as marker:
-                marker.write(str(percent).encode())
-            os.replace(marker.name, directory.parent / 'recognition.progress')
-        progress(0)
-        run(['/opt/whisper/bin/whisper-cli', '-m', os.environ.get('WHISPER_MODEL', '/opt/models/ggml-tiny.bin'), '-f', str(audio), '-l', language, '-t', '4', '-ng', '-pp', '-otxt', '-of', str(result)], cwd=directory, timeout=3600, on_progress=progress)
-        if output.is_symlink() or not output.resolve().is_relative_to(directory.resolve()):
-            fail('UNSAFE_OUTPUT', 'Обработчик создал недопустимый выходной файл.')
-        with output.open(encoding='utf-8') as transcript:
-            text = transcript.read(140001)
-    finally:
-        audio.unlink(missing_ok=True)
-        output.unlink(missing_ok=True)
-    if len(text) > 140000:
-        fail('TRANSCRIPT_LIMIT', 'Расшифровка превышает 140 000 символов. Разделите видео на более короткие записи.')
-    return {'text': text, 'duration': duration}
+    language = body.language if body.language in ['ru', 'en', 'auto'] else 'ru'
+
+    def progress(percent):
+        with tempfile.NamedTemporaryFile(dir=directory, delete=False) as marker:
+            marker.write(str(percent).encode())
+        os.replace(marker.name, directory.parent / 'recognition.progress')
+
+    progress(0)
+    run(['/opt/whisper/bin/whisper-cli', '-m', WHISPER_MODEL, '--vad', '--vad-model', WHISPER_VAD,
+         '--vad-speech-pad-ms', '200', '--max-context', '0', '-f', str(audio), '-l', language,
+         '-t', '4', '-ng', '-pp', '-otxt', '-of', str(result)], cwd=directory, timeout=3600, on_progress=progress)
+    # Whisper writes no output when the VAD finds no speech at all.
+    if not output.exists() and not output.is_symlink():
+        fail('NO_SPEECH', 'Whisper не обнаружил речи. Проверьте звуковую дорожку.')
+    if output.is_symlink() or not output.is_file() or not output.resolve().is_relative_to(directory.resolve()):
+        fail('UNSAFE_OUTPUT', 'Обработчик создал недопустимый выходной файл.')
+    with output.open('rb') as transcript:
+        raw = transcript.read(MAX_TRANSCRIPT_BYTES + 1)
+    if len(raw) > MAX_TRANSCRIPT_BYTES:
+        fail('TRANSCRIPT_LIMIT', 'Расшифровка слишком длинная. Разделите видео на более короткие записи.')
+    text = transcription.clean_transcript(raw.decode('utf-8'))
+    if len(text) > MAX_TRANSCRIPT_CHARS:
+        fail('TRANSCRIPT_LIMIT', 'Расшифровка слишком длинная. Разделите видео на более короткие записи.')
+    return text
 
 
 class SlidesInput(MediaRequest):
-    pdf: str = Field(max_length=60)
+    pdf: str = Field(max_length=68)
+
+
+pdf_extract_slot = threading.BoundedSemaphore(1)
 
 
 @app.post('/slides', dependencies=[Depends(auth)])
-@serialized_media
 def slides(body: SlidesInput):
-    return cached_output('pdf-text', body, body.pdf, extract_slides)
+    with pdf_extract_slot:
+        return cached_output('pdf-text', body, body.pdf, extract_slides)
 
 
 def extract_slides(_body, directory, pdf):
     pages = pdf_pages(directory, pdf)
-    text = run(['pdftotext', '-f', '1', '-l', '500', '-layout', str(pdf), '-'], cwd=directory, timeout=60, read_file=pdf)
-    sections = [(f'[Слайд {i}] ', page.strip()) for i, page in enumerate(text.split('\f')[:pages], 1) if page.strip()]
-    size = sum(len(label) + len(content) + 1 for label, content in sections)
-    condensed = size > 40000
-    if condensed:
-        budget = (40000 - sum(len(label) + 1 for label, _ in sections)) // len(sections)
-        sections = [(label, content[:budget]) for label, content in sections]
-    return {'text': '\n'.join(label + content for label, content in sections), 'pages': pages, 'condensed': condensed}
+    limit = 4_000_000
+    text = run(['pdftotext', '-f', '1', '-l', str(pages), '-layout', str(pdf), '-'],
+               cwd=directory, timeout=60, read_file=pdf, output_limit=limit + 1)
+    if len(text.encode('utf-8')) > limit:
+        fail('PDF_TEXT_LIMIT', 'Текст презентации превышает 4 МБ. Разделите PDF на части.')
+    return {'text': '\n\n'.join(f'[Слайд {i}] {page.strip()}'
+                              for i, page in enumerate(text.split('\f')[:pages], 1) if page.strip()),
+            'pages': pages, 'condensed': False}
 
 
 def pdf_pages(directory, pdf):
@@ -194,6 +268,10 @@ class SlidePreview(SlidesInput):
 
 
 preview_slot = threading.Semaphore(1)
+preview_cache = OrderedDict()
+PREVIEW_CACHE_BYTES = 32 * 1024 * 1024
+PREVIEW_CACHE_SECONDS = 15 * 60
+preview_bytes = 0
 
 
 def slide_jpeg(directory, pdf, page):
@@ -204,22 +282,47 @@ def slide_jpeg(directory, pdf, page):
         image = target.with_suffix('.jpg')
         if image.is_symlink() or not image.is_file() or image.stat().st_size > 2_000_000:
             fail('PDF_PREVIEW', 'Не удалось показать страницу PDF.')
-        return base64.b64encode(image.read_bytes()).decode('ascii')
+        return image.read_bytes()
 
 
 @app.post('/slide-preview', dependencies=[Depends(auth)])
 def slide_preview(body: SlidePreview):
-    with preview_slot:
-        return cached_output('pdf-jpeg', body, body.pdf, render_preview)
+    return cached_output('pdf-jpeg', body.model_copy(update={'cachedVersion': None}), body.pdf, render_preview)
 
 
 def render_preview(body, directory, pdf):
     if pdf.suffix != '.pdf':
         raise HTTPException(404)
-    pages = pdf_pages(directory, pdf)
-    if body.page > pages:
-        fail('PDF_PAGE', 'Такой страницы нет в презентации.')
-    return {'pages': pages, 'jpeg': slide_jpeg(directory, pdf, body.page) if body.page else None}
+    stat = pdf.stat()
+    identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_ctime_ns)
+    source = pdf.stem if pdf.parent.name == 'blobs' else file_fingerprint(str(pdf), identity)
+    with preview_slot:
+        pages, _ = cached_preview((source, 0), lambda: (pdf_pages(directory, pdf), b''))
+        if body.page > pages:
+            fail('PDF_PAGE', 'Такой страницы нет в презентации.')
+        if not body.page:
+            return {'pages': pages, 'jpeg': None}
+        _, jpeg = cached_preview((source, body.page), lambda: (pages, slide_jpeg(directory, pdf, body.page)))
+        return {'pages': pages, 'jpeg': base64.b64encode(jpeg).decode('ascii')}
+
+
+def cached_preview(key, render):
+    global preview_bytes
+    timestamp = time.monotonic()
+    cached = preview_cache.pop(key, None)
+    if cached:
+        if cached[0] > timestamp:
+            preview_cache[key] = cached
+            return cached[1:]
+        preview_bytes -= len(cached[2])
+    pages, jpeg = render()
+    preview_cache[key] = (time.monotonic() + PREVIEW_CACHE_SECONDS, pages, jpeg)
+    preview_bytes += len(jpeg)
+    for expired in [key for key, cached in preview_cache.items() if cached[0] <= timestamp]:
+        preview_bytes -= len(preview_cache.pop(expired)[2])
+    while preview_bytes > PREVIEW_CACHE_BYTES or len(preview_cache) > 2048:
+        preview_bytes -= len(preview_cache.popitem(last=False)[1][2])
+    return pages, jpeg
 
 
 

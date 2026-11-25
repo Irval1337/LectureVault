@@ -8,6 +8,47 @@ from fastapi.testclient import TestClient
 
 from runner import provider
 from runner.common import auth
+from backend.transcript import clean_transcript
+
+
+def test_transcript_cleanup_removes_subtitle_credits_and_limits_repetition():
+    text = (
+        'Редактор субтитров А.Синецкая Корректор А.Сухиашвили\n'
+        'Редактор субтитров А.Синецкая Корректор А.С dominating\n'
+        'Редактор субтитров А.Синецкая\n'
+        'Редактор субтитров А.Сухиашвили\n'
+        'Итак, введём определение.\n\n'
+        'Смотрим на правую часть!\nСмотрим на правую часть.\n'
+        'Смотрим на правую часть\nсмотрим на правую часть\n'
+        'Из этого следует результат.\nДа.\nДа.\n'
+    )
+    cleaned = clean_transcript(text)
+    assert cleaned == 'Итак, введём определение.\n\nСмотрим на правую часть!\nИз этого следует результат.\nДа.\nДа.\n'
+    assert clean_transcript(cleaned) == cleaned
+
+
+def test_detailed_generation_keeps_long_result_and_defers_to_model_limit(monkeypatch):
+    markdown = '## Ход доказательства\n' + 'Сохраняем промежуточный шаг.\n' * 9000
+    requests = []
+
+    def reply(_url, **options):
+        requests.append(options)
+        return httpx.Response(200, json={'status': 'completed', 'output': [
+            {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': markdown}]}
+        ]})
+
+    monkeypatch.setattr(httpx, 'post', reply)
+    monkeypatch.setattr(provider, 'connected', lambda *_: True)
+    monkeypatch.setattr(provider, 'api_config', lambda *_: {'baseUrl': provider.OPENAI_BASE, 'key': 'fixture'})
+    body = provider.GenerateInput(userId='5a21857e-b777-441a-9999-7c9c5a94d222', provider='openai',
+                                  model='gpt-6.2-sol', effort='medium', title='Лекция', preset='lecture',
+                                  length='detailed', instructions='', transcript='Исходный материал')
+    assert provider.generate_note(body)['markdown'] == markdown.strip()
+    assert 'max_output_tokens' not in requests[0]['json']
+    assert 'промежуточные шаги' in requests[0]['json']['instructions']
+    provider.generate_note(body.model_copy(update={'targetWords': 750}))
+    assert requests[1]['json']['max_output_tokens'] == 16000
+    assert '750 слов' in requests[1]['json']['instructions']
 
 
 @pytest.fixture
@@ -90,14 +131,17 @@ def test_media_failure_removes_temporary_audio(monkeypatch, tmp_path):
     assert not (tmp_path / 'audio.wav').exists()
 
 
-def test_long_pdf_is_explicitly_condensed_and_retains_page_numbers(monkeypatch, tmp_path):
+def test_long_pdf_retains_full_text_and_page_numbers(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
     from runner import server
     (tmp_path / 'slides.pdf').touch()
     monkeypatch.setattr(server, 'job_file', lambda *_args: (tmp_path, tmp_path / 'slides.pdf'))
     monkeypatch.setattr(server, 'run', lambda argv, **_kwargs: 'Pages: 120' if argv[0] == 'pdfinfo' else ('A' * 400 + '\f') * 120)
-    result = server.slides(server.SlidesInput(jobId='x', pdf='x'))
-    assert result['pages'] == 120 and result['condensed']
-    assert len(result['text']) <= 40000 and '[Слайд 120]' in result['text']
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with server.media_lock:
+            result = executor.submit(server.slides, server.SlidesInput(jobId='x', pdf='x')).result(timeout=2)
+    assert result['pages'] == 120 and not result['condensed']
+    assert result['text'].count('A') == 48_000 and result['text'].endswith('[Слайд 120] ' + 'A' * 400)
 
 
 @pytest.mark.parametrize(('http_status', 'status', 'code'), [
@@ -154,7 +198,7 @@ def test_custom_models_cache_is_private_and_connection_changes_revalidate(monkey
     provider.save_key(provider.ApiKey(userId=first, provider='openai', baseUrl='https://models.example/v1', apiKey='my-key'))
     for _ in range(2):
         status = provider.provider_status({'userId': first})['providers']
-        assert status[1]['models'] == [{'id': 'org/lecture-v4:latest', 'name': 'Lecture', 'efforts': []}]
+        assert status[1]['models'] == [{'id': 'org/lecture-v4:latest', 'name': 'Lecture', 'efforts': [], 'supportsImages': False}]
         assert 'my-key' not in str(status)
     assert not provider.provider_status({'userId': second})['providers'][1]['models']
     assert len(calls) == 1
@@ -216,8 +260,9 @@ def test_job_without_saved_model_uses_connected_catalog(monkeypatch):
     monkeypatch.setattr(provider, 'connected', lambda *_: True)
     monkeypatch.setattr(provider, 'catalog_for', lambda *_: ([{'id': 'account-model', 'efforts': ['low']}], ''))
     monkeypatch.setattr(provider, 'api_config', lambda *_: {'baseUrl': provider.OPENAI_BASE, 'key': 'unused'})
-    def respond(key, model, effort, system, prompt):
+    def respond(key, model, effort, system, prompt, *, detailed):
         assert (model, effort) == ('account-model', 'low')
+        assert not detailed
         return '## Лекция'
     monkeypatch.setattr(provider, 'openai_response', respond)
     job = provider.GenerateInput(userId='5a21857e-b777-441a-9999-7c9c5a94d222', provider='openai',
@@ -276,8 +321,9 @@ def test_same_account_api_generations_overlap_with_independent_inputs(monkeypatc
     monkeypatch.setattr(provider, 'connected', lambda *_: True)
     monkeypatch.setattr(provider, 'catalog_for', lambda *_: ([], ''))
     monkeypatch.setattr(provider, 'api_config', lambda *_: {'key':'unused', 'baseUrl':'https://model.example/v1'})
-    def generate(config, model, system, prompt, effort):
+    def generate(config, model, system, prompt, effort, *, detailed):
         sync.wait(timeout=3)
+        assert not detailed
         assert 'до 750 слов' in system
         assert 'не более 3' in system
         return json.loads(prompt)['title']

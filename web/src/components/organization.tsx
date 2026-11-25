@@ -1,9 +1,9 @@
 import { useEffect, useId, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { Folder, FolderOpen, BookOpen, Code, FlaskConical, Sigma, Music, Pencil, FileText, ChevronRight, ChevronDown } from 'lucide-react'
-import type { Course, Note } from '../data/model'
+import { canDeleteNote, type Course, type Note } from '../data/model'
 import { plural } from '../lib/utils'
-import { library } from '../data/store'
+import { library, useSession } from '../data/store'
 import { Button } from './ui/button'
 import { Dialog } from './ui/dialog'
 import { ActionMenu, openRowActions } from './ui/action-menu'
@@ -56,6 +56,7 @@ export function NoteActions({ note, course, paths, children, tableRow }: NoteAct
   const inputId = useId()
   const navigate = useNavigate()
   const location = useLocation()
+  const session = useSession()
   const writable = course.role === 'owner' || course.role === 'editor'
   const url = `/notes/${note.id}`
 
@@ -95,10 +96,8 @@ export function NoteActions({ note, course, paths, children, tableRow }: NoteAct
         <Button asChild variant="ghost" size="sm"><Link to={url}>Открыть</Link></Button>
         {writable && <Button asChild variant="ghost" size="sm"><Link to={url + '/edit'}>Редактировать</Link></Button>}
         <Button asChild variant="ghost" size="sm"><a download href={'/api' + url + '/export'}>Скачать Markdown</a></Button>
-        {writable && <>
-          <Button variant="ghost" size="sm" onClick={chooseCategory}>Переместить в категорию</Button>
-          <Button variant="ghost" size="sm" className="danger-action" onClick={() => void deleteNote()}>Удалить заметку</Button>
-        </>}
+        {writable && <Button variant="ghost" size="sm" onClick={chooseCategory}>Переместить в категорию</Button>}
+        {canDeleteNote(course, note, session.user?.id) && <Button variant="ghost" size="sm" className="danger-action" onClick={() => void deleteNote()}>Удалить заметку</Button>}
       </ActionMenu>
     </div>
     {move && <Dialog open={move} onOpenChange={setMove} title="Категория заметки" description={note.title}>

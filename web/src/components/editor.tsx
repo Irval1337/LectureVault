@@ -18,13 +18,14 @@ import { editorPictureSizes } from './editor-picture-size'
 import { tableInsertionTools } from './editor-table'
 import { ActionMenu } from './ui/action-menu'
 import './editor-polish.css'
-import { ArrowLeft, ChevronDown, Save } from 'lucide-react'
+import { ArrowLeft, ChevronDown, History, Save } from 'lucide-react'
 import { library, useSession } from '../data/store'
 import { api, ApiError } from '../data/api'
 import type { Note } from '../data/model'
 import { downloadText } from '../lib/utils'
 import { Button } from './ui/button'
 import { TabBar } from './ui/tab-bar'
+import { NoteHistory } from './note-history'
 import { SourceEditor } from './source-editor'
 
 // Crepe also mounts CodeMirror for read-only previews. Give overflowing code a
@@ -88,7 +89,7 @@ function exposeListItems(editor: HTMLElement) {
   return observer
 }
 
-function CrepeEditor({ initial, noteId, settingsSlot, onChange, onReady, onError }: { settingsSlot: HTMLElement | null; initial: string; noteId: string; onChange: (markdown: string) => void; onReady: (read: () => string) => void; onError: (message: string) => void }) {
+function CrepeEditor({ initial, noteId, settingsSlot, onChange, onReady, onError }: { settingsSlot: HTMLElement | null; initial: string; noteId: string; onChange: (markdown: string) => void; onReady: (read: () => string) => void; onError: (message: string, code?: string) => void }) {
   const [formatOpen, setFormatOpen] = useState(false)
   const editor = useRef<EditorView | null>(null)
   const [pictureCount, setPictureCount] = useState(0)
@@ -104,7 +105,10 @@ function CrepeEditor({ initial, noteId, settingsSlot, onChange, onReady, onError
     let initialDoc: ProseNode | undefined
     let lastDoc: ProseNode | undefined
     let listObserver: MutationObserver | undefined
-    const upload = (file: File) => library.uploadImage(noteId, file).catch(error => { callbacks.current.onError((error as Error).message); throw error })
+    const upload = (file: File) => library.uploadImage(noteId, file).catch(error => {
+      callbacks.current.onError((error as Error).message, error instanceof ApiError ? error.code : undefined)
+      throw error
+    })
     const crepe = new Crepe({ root: host.current, defaultValue: initial, features: { [Crepe.Feature.AI]: false, [Crepe.Feature.TopBar]: true }, featureConfigs: {
       [Crepe.Feature.TopBar]: {
         headingOptions: [{ level: null, label: 'Текст' }, ...[1, 2, 3, 4, 5, 6].map(level => ({ level, label: `Заголовок ${level}` }))],
@@ -230,7 +234,7 @@ function CrepeEditor({ initial, noteId, settingsSlot, onChange, onReady, onError
 // An editor reopened during its previous save must initialize against the committed
 // revision and the reconciled browser draft, even if the user switched routes.
 const pendingSaves = new Map<string, Promise<void>>()
-type EditorProps = { note: Note; canEdit: boolean }
+type EditorProps = { note: Note; canEdit: boolean; ownsCourse: boolean }
 
 export default function NoteEditor(props: EditorProps) {
   const session = useSession()
@@ -245,7 +249,7 @@ export default function NoteEditor(props: EditorProps) {
   return <EditableNote {...props} draftKey={draftKey} />
 }
 
-function EditableNote({ note, canEdit, draftKey: key }: EditorProps & { draftKey: string }) {
+function EditableNote({ note, canEdit, ownsCourse, draftKey: key }: EditorProps & { draftKey: string }) {
   const [original] = useState(() => {
     try {
       const draft = JSON.parse(localStorage.getItem(key) || 'null')
@@ -261,8 +265,11 @@ function EditableNote({ note, canEdit, draftKey: key }: EditorProps & { draftKey
   const [editorInitial, setEditorInitial] = useState(original.markdown)
   const [editorVersion, setEditorVersion] = useState(0)
   const [settingsSlot, setSettingsSlot] = useState<HTMLDivElement | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
+  const [failure, setFailure] = useState<{ message: string; code?: string }>({ message: '' })
+  const { message: error } = failure
+  const setError = (message: string, code?: string) => setFailure({ message, code })
   const [conflict, setConflict] = useState(false)
   const [saved, setSaved] = useState({ title: note.title, markdown: note.markdown })
   // Milkdown's change listener is debounced. Read its current document when
@@ -281,49 +288,71 @@ function EditableNote({ note, canEdit, draftKey: key }: EditorProps & { draftKey
   }
   const updateMarkdown = (value: string) => { setMarkdown(value); remember(value) }
   useEffect(() => { remember() }, [key, title, markdown, revision, dirty])
-  const save = async () => {
-    if (!canEdit || savingNow.current || !ready) return
-    if (!title.trim()) { setError('Введите название заметки.'); return }
+  const runSave = async (action: () => Promise<void>) => {
     savingNow.current = true
     let finishSave!: () => void
     pendingSaves.set(key, new Promise<void>(resolve => { finishSave = resolve }))
     setSaving(true); setError(''); setConflict(false)
-    try {
-      const current = mode === 'visual' ? readVisual.current?.() ?? markdown : markdown
-      setMarkdown(current)
-      const result = await library.saveNote(note.id, title.trim(), current, revision)
-      setRevision(result.revision!)
-      setTitle(latestTitle => latestTitle === title ? result.title : latestTitle)
-      setSaved({ title: result.title, markdown: result.markdown })
-      // Navigation and further edits are allowed while the server is saving.
-      // Advance only the submitted draft's base revision, retaining subsequent edits.
-      try {
-        const draft = JSON.parse(localStorage.getItem(key) || 'null')
-        if (draft?.revision === revision && draft.writer === draftWriter) {
-          if (draft.title === title && draft.markdown === current) localStorage.removeItem(key)
-          else localStorage.setItem(key, JSON.stringify({ ...draft, revision: result.revision }))
-        }
-      } catch { /* The mounted editor also persists the latest draft. */ }
-    } catch (error) { setError((error as Error).message); setConflict(error instanceof ApiError && error.status === 409) }
+    try { await action() }
     finally {
       savingNow.current = false; setSaving(false)
       pendingSaves.delete(key); finishSave()
     }
   }
+  const save = async () => {
+    if (!canEdit || savingNow.current || !ready || historyOpen) return
+    if (!title.trim()) { setError('Введите название заметки.'); return }
+    await runSave(async () => {
+      try {
+        const current = mode === 'visual' ? readVisual.current?.() ?? markdown : markdown
+        setMarkdown(current)
+        const result = await library.saveNote(note.id, title.trim(), current, revision)
+        setRevision(result.revision!)
+        setTitle(latestTitle => latestTitle === title ? result.title : latestTitle)
+        setSaved({ title: result.title, markdown: result.markdown })
+        // Navigation and further edits are allowed while the server is saving.
+        // Advance only the submitted draft's base revision, retaining subsequent edits.
+        try {
+          const draft = JSON.parse(localStorage.getItem(key) || 'null')
+          if (draft?.revision === revision && draft.writer === draftWriter) {
+            if (draft.title === title && draft.markdown === current) localStorage.removeItem(key)
+            else localStorage.setItem(key, JSON.stringify({ ...draft, revision: result.revision }))
+          }
+        } catch { /* The mounted editor also persists the latest draft. */ }
+      } catch (error) { setError((error as Error).message); setConflict(error instanceof ApiError && error.status === 409) }
+    })
+  }
+  const showSavedVersion = (current: Note) => {
+    readVisual.current = undefined
+    setReady(false); setTitle(current.title); setMarkdown(current.markdown); setEditorInitial(current.markdown)
+    setRevision(current.revision!); setSaved({ title: current.title, markdown: current.markdown }); setConflict(false); setError('')
+    setEditorVersion(version => version + 1)
+  }
   const resetToCurrent = async () => {
     if (!window.confirm('Заменить этот черновик сохранённой версией? При необходимости сначала скачайте черновик.')) return
     try {
       const current = await api<Note>(`/notes/${note.id}`)
-      setReady(false); setTitle(current.title); setMarkdown(current.markdown); setEditorInitial(current.markdown)
-      setRevision(current.revision!); setSaved({ title: current.title, markdown: current.markdown }); setConflict(false); setError('')
-      // Recreate the editor even if the remote Markdown happens to match.
-      setMode('source'); setEditorVersion(version => version + 1)
+      showSavedVersion(current)
+      setMode('source')
     } catch (error) { setError((error as Error).message) }
   }
   const preserveBeforeExit = () => {
     const current = mode === 'visual' ? readVisual.current?.() ?? markdown : markdown
     remember(current)
     return title !== saved.title || current !== saved.markdown
+  }
+  const restoreVersion = async (version: number, currentRevision: number) => {
+    if (!canEdit || savingNow.current) return
+    if (preserveBeforeExit() && !window.confirm('Заменить несохранённый черновик выбранной версией?')) return
+    await runSave(async () => {
+      const restored = await library.restoreNote(note.id, version, currentRevision)
+      try {
+        const draft = JSON.parse(localStorage.getItem(key) || 'null')
+        if (draft?.writer === draftWriter) localStorage.removeItem(key)
+      } catch { /* The mounted editor also reconciles the draft. */ }
+      showSavedVersion(restored)
+      setHistoryOpen(false)
+    })
   }
   const latest = useRef({ save, preserveBeforeExit })
   latest.current = { save, preserveBeforeExit }
@@ -335,5 +364,5 @@ function EditableNote({ note, canEdit, draftKey: key }: EditorProps & { draftKey
   }, [])
   if (!canEdit) return <div className="quiet-empty"><h1>Только чтение</h1><p>Попросите владельца категории дать вам права на редактирование.</p><Link to={`/notes/${note.id}`}>К заметке</Link></div>
   const headingMatchesTitle = markdown.trimStart().split('\n', 1)[0]?.replace(/^#\s+/, '').trim() === title.trim() && markdown.trimStart().startsWith('# ')
-  return <section className={`note-editor${headingMatchesTitle ? ' has-document-title' : ''}`}><div className="editor-controls"><Link className="editor-back" to={`/notes/${note.id}`}><ArrowLeft size={15} />Чтение</Link><span role="status">{saving ? 'Сохраняем…' : dirty ? 'Черновик' : 'Сохранено на сервере'}</span><div className="editor-settings-slot" ref={setSettingsSlot}/><Button size="sm" disabled={saving || !ready} onClick={() => void save()}><Save size={15} />Сохранить</Button></div><label htmlFor="editor-title" className="sr-only">Название заметки</label><input id="editor-title" className="editor-title" placeholder="Название заметки" value={title} maxLength={120} onChange={event => setTitle(event.target.value)} />{error && <div className="editor-error" role="alert"><p>{error}</p><Button variant="outline" size="sm" onClick={() => downloadText(markdown, `${title || 'Черновик'}.md`)}>Скачать черновик</Button>{conflict && <Button variant="outline" size="sm" onClick={() => void resetToCurrent()}>Загрузить актуальную версию</Button>}</div>}{!ready && <p role="status" className="field-hint">Открываем редактор…</p>}<TabBar label="Режим редактора" panelId="note-editor-panel" value={mode} onValueChange={value => { if (value === mode) return; const current = mode === 'visual' ? readVisual.current?.() ?? markdown : markdown; setMarkdown(current); setEditorInitial(current); readVisual.current = undefined; setMode(value); setReady(false) }} items={[{ value: 'visual', label: 'Визуально' }, { value: 'source', label: 'Markdown' }]} /><div id="note-editor-panel" role="tabpanel" aria-labelledby={`note-editor-panel-${mode}-tab`}>{mode === 'visual' ? <CrepeEditor settingsSlot={settingsSlot} key={editorVersion} initial={editorInitial} noteId={note.id} onChange={updateMarkdown} onReady={read => { readVisual.current = read; setReady(true) }} onError={setError} /> : <SourceEditor key={editorVersion} initial={editorInitial} onChange={updateMarkdown} onReady={() => setReady(true)} />}</div></section>
+  return <section className={`note-editor${headingMatchesTitle ? ' has-document-title' : ''}`}><div className="editor-controls"><Link className="editor-back" to={`/notes/${note.id}`}><ArrowLeft size={15} />Чтение</Link><span role="status">{saving ? 'Сохраняем…' : dirty ? 'Черновик' : 'Сохранено на сервере'}</span><div className="editor-settings-slot" ref={setSettingsSlot}/><Button variant="ghost" size="sm" disabled={saving} onClick={() => setHistoryOpen(true)}><History size={15} />История версий</Button><Button size="sm" disabled={saving || !ready} onClick={() => void save()}><Save size={15} />Сохранить</Button></div>{historyOpen && <NoteHistory noteId={note.id} onClose={() => setHistoryOpen(false)} onRestore={restoreVersion} />}<label htmlFor="editor-title" className="sr-only">Название заметки</label><input id="editor-title" className="editor-title" placeholder="Название заметки" value={title} maxLength={120} onChange={event => setTitle(event.target.value)} />{error && <div className="editor-error" role="alert"><p>{error}</p>{failure.code === "STORAGE_QUOTA" && ownsCourse && <Link className="inline-action" to={"/settings?course=" + note.courseId + "#storage"} state={{ fromNote: note.id }}>Открыть хранилище</Link>}<Button variant="outline" size="sm" onClick={() => downloadText(markdown, `${title || 'Черновик'}.md`)}>Скачать черновик</Button>{conflict && <Button variant="outline" size="sm" onClick={() => void resetToCurrent()}>Загрузить актуальную версию</Button>}</div>}{!ready && <p role="status" className="field-hint">Открываем редактор…</p>}<TabBar label="Режим редактора" panelId="note-editor-panel" value={mode} onValueChange={value => { if (value === mode) return; const current = mode === 'visual' ? readVisual.current?.() ?? markdown : markdown; setMarkdown(current); setEditorInitial(current); readVisual.current = undefined; setMode(value); setReady(false) }} items={[{ value: 'visual', label: 'Визуально' }, { value: 'source', label: 'Markdown' }]} /><div id="note-editor-panel" role="tabpanel" aria-labelledby={`note-editor-panel-${mode}-tab`}>{mode === 'visual' ? <CrepeEditor settingsSlot={settingsSlot} key={editorVersion} initial={editorInitial} noteId={note.id} onChange={updateMarkdown} onReady={read => { readVisual.current = read; setReady(true) }} onError={setError} /> : <SourceEditor key={editorVersion} initial={editorInitial} onChange={updateMarkdown} onReady={() => setReady(true)} />}</div></section>
 }

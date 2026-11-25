@@ -1,4 +1,5 @@
 import { useLayoutEffect, useMemo, useRef } from 'react'
+import { useLocation, useNavigate, useNavigationType } from 'react-router-dom'
 import { h, render, type FunctionComponent } from 'preact'
 import { ContentBody } from '@quartz-community/content-page/components'
 import { TableOfContents } from '@quartz-community/table-of-contents/components'
@@ -26,6 +27,7 @@ export function compileMarkdown(markdown: string, title?: string) {
   const tree = processor.runSync(processor.parse(markdown)) as Root
   if (tree.children[0]?.type === 'element' && tree.children[0].tagName === 'h1' && toString(tree.children[0]).trim() === title?.trim()) tree.children.shift()
   const toc: TocEntry[] = []
+  let slides = 0
   visit(tree, 'element', (node: Element) => {
     if (/^h[2-4]$/.test(node.tagName)) toc.push({ depth: Number(node.tagName[1]) - 2, slug: String(node.properties.id), text: toString(node) })
     if (node.tagName === 'img' && node.properties.src !== '/demo-replication.svg' && !(typeof node.properties.src === 'string' && /^\/api\/assets\/[a-f0-9-]{36}(?:\/slides\/[1-9]\d{0,2}\.jpg)?$/.test(node.properties.src))) {
@@ -35,8 +37,14 @@ export function compileMarkdown(markdown: string, title?: string) {
       const { alt, caption, ratio } = imageDetails(String(node.properties.alt ?? ''), String(node.properties.title ?? ''))
       node.properties.alt = alt
       node.properties.title = caption || undefined
-      node.properties.loading = 'lazy'
-      if (ratio !== 1) node.properties.dataImageScale = ratio
+      if (String(node.properties.src).includes('/slides/')) {
+        node.properties.className = ['reader-slide-image']
+        node.properties.loading = slides++ < 2 ? 'eager' : 'lazy'
+        if (ratio !== 1) node.properties.style = `--slide-width:${Math.min(100, ratio * 100)}%`
+      } else {
+        node.properties.loading = 'lazy'
+        if (ratio !== 1) node.properties.dataImageScale = ratio
+      }
     }
     if (node.tagName === 'a' && typeof node.properties.href === 'string' && /^https?:/.test(node.properties.href)) {
       node.properties.target = '_blank'; node.properties.rel = ['noopener', 'noreferrer']
@@ -47,12 +55,17 @@ export function compileMarkdown(markdown: string, title?: string) {
 
 const OriginalContent = ContentBody() as FunctionComponent<QuartzComponentProps>
 const OriginalToc = TableOfContents({ layout: 'legacy' }) as FunctionComponent<QuartzComponentProps>
+const readingPositions = new Map<string, number>()
 
-export type ArticleProps = { markdown: string; title: string; onOutline: (entries: TocEntry[]) => void }
+export type ArticleProps = { markdown: string; title: string; onOutline?: (entries: TocEntry[]) => void; preview?: boolean }
 
-export function QuartzArticle({ markdown, title, onOutline }: ArticleProps) {
+export function QuartzArticle({ markdown, title, onOutline, preview = false }: ArticleProps) {
   const host = useRef<HTMLDivElement>(null)
   const compiled = useMemo(() => compileMarkdown(markdown, title), [markdown, title])
+  const { key, hash } = useLocation()
+  const navigationType = useNavigationType()
+  const outline = useRef(onOutline)
+  useLayoutEffect(() => { outline.current = onOutline }, [onOutline])
   useLayoutEffect(() => {
     const element = host.current!
     render(h(OriginalContent, { fileData: {}, tree: compiled.tree } as unknown as QuartzComponentProps), element)
@@ -60,31 +73,66 @@ export function QuartzArticle({ markdown, title, onOutline }: ArticleProps) {
       const ratio = Number(img.dataset.imageScale)
       if (!ratio || !img.naturalWidth) return
       img.style.width = `min(${Math.min(100, ratio * 100)}%, ${img.naturalWidth * ratio}px)`
-      if (img.src.includes('/slides/')) img.style.maxHeight = `${52 * Math.min(1, ratio)}vh`
     }
     const onLoad = (event: Event) => { if (event.target instanceof HTMLImageElement) applySize(event.target) }
     element.addEventListener('load', onLoad, true)
     element.querySelectorAll<HTMLImageElement>('img[data-image-scale]').forEach(applySize)
-    onOutline(compiled.toc)
-    // The document can arrive after the browser's initial fragment navigation.
-    const fragment = window.location.hash.slice(1)
-    const frame = requestAnimationFrame(async () => {
-      if (!fragment) return
-      let id: string
-      try { id = decodeURIComponent(fragment) } catch { return }
-      const target = document.getElementById(id)
-      if (!target || (!element.contains(target) && id !== 'presentation')) return
-      // Font substitution can move a heading by several paragraphs in a long note.
-      await document.fonts.ready
-      if (target.isConnected && window.location.hash.slice(1) === fragment) target.scrollIntoView({ block: 'start' })
+    return () => { element.removeEventListener('load', onLoad, true); render(null, element) }
+  }, [compiled])
+  useLayoutEffect(() => { outline.current?.(compiled.toc) }, [compiled, key])
+  useLayoutEffect(() => {
+    if (preview) return
+    // The route can be ready before the lazy article has rendered.
+    const previous = navigationType === 'POP' ? readingPositions.get(key) : undefined
+    let settled = false
+    const remember = () => {
+      if (!settled) return
+      if (!readingPositions.has(key) && readingPositions.size >= 50) {
+        readingPositions.delete(readingPositions.keys().next().value!)
+      }
+      readingPositions.set(key, window.scrollY)
+    }
+    const frame = requestAnimationFrame(() => {
+      if (previous !== undefined) {
+        window.scrollTo({ top: previous, behavior: 'instant' })
+      } else if (hash) {
+        let id: string
+        try { id = decodeURIComponent(hash.slice(1)) } catch { id = '' }
+        const target = document.getElementById(id)
+        if (target && (host.current?.contains(target) || id === 'presentation')) {
+          target.scrollIntoView({ block: 'start', behavior: 'instant' })
+          target.tabIndex = -1
+          target.focus({ preventScroll: true })
+        }
+      } else if (navigationType !== 'POP') {
+        window.scrollTo({ top: 0, behavior: 'instant' })
+      }
+      settled = true
+      remember()
     })
-    return () => { cancelAnimationFrame(frame); element.removeEventListener('load', onLoad, true); render(null, element) }
-  }, [compiled, onOutline])
+    window.addEventListener('scroll', remember, { passive: true })
+    return () => { cancelAnimationFrame(frame); window.removeEventListener('scroll', remember) }
+  }, [hash, key, navigationType, preview])
   return <div className="quartz-reader" ref={host} />
 }
 
-export function QuartzToc({ entries }: { entries: TocEntry[] }) {
+export function QuartzToc({ entries, onNavigate }: { entries: TocEntry[]; onNavigate?: () => void }) {
   const host = useRef<HTMLDivElement>(null)
+  const navigate = useNavigate()
+  const location = useLocation()
+  useLayoutEffect(() => {
+    const element = host.current!
+    const follow = (event: MouseEvent) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
+      const hash = (event.target as HTMLElement).closest('a')?.getAttribute('href')
+      if (!hash?.startsWith('#')) return
+      event.preventDefault()
+      onNavigate?.()
+      navigate({ pathname: location.pathname, search: location.search, hash }, { state: location.state })
+    }
+    element.addEventListener('click', follow)
+    return () => element.removeEventListener('click', follow)
+  }, [location, navigate, onNavigate])
   useLayoutEffect(() => {
     const element = host.current!
     render(h(OriginalToc, { cfg: { locale: 'ru-RU' }, fileData: { toc: entries, collapseToc: false } } as unknown as QuartzComponentProps), element)

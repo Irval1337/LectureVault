@@ -88,7 +88,12 @@ services:
     <<: *app
     environment: {LV_LOCAL_MODEL_BASES: "${LV_LOCAL_MODEL_BASES:-}"}
     extra_hosts: ["host.docker.internal:host-gateway"]
-    build: {context: ., dockerfile: deploy/Dockerfile.providers}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.providers
+      no_cache: true  # Resolve the current npm release on every providers build.
+      args:
+        LV_CODEX_VERSION: ${LV_CODEX_VERSION:-latest}
     volumes: ["profiles:/profiles", "secret-providers:/secrets:ro"]
     tmpfs: ["/tmp:rw,noexec,nosuid,size=64m", "/work:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"]
     networks: [accounts, provider-egress]

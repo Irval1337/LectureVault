@@ -5,6 +5,7 @@ from typing import Literal
 ProviderId = Literal['codex', 'claude', 'openai']
 OPENAI_BASE = 'https://api.openai.com/v1'
 ANTHROPIC_BASE = 'https://api.anthropic.com/v1'
+GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/openai'
 CATALOG = [
     {'id': 'codex', 'name': 'Codex', 'authType': 'deviceCode', 'models': []},
     {'id': 'openai', 'name': 'Свой API', 'authType': 'apiKey', 'models': []},
@@ -12,6 +13,12 @@ CATALOG = [
 ]
 PROVIDERS = {p['id']: p for p in CATALOG}
 EFFORTS = ('low', 'medium', 'high', 'xhigh')
+MAX_NOTE_CHARS = 1_000_000
+DETAILED_GENERATION_SECONDS = 1800
+DETAILED_REQUIRED_TOKEN_BUDGET = 50_000
+MAX_SLIDE_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_SLIDE_IMAGES = 16
+
 def valid_api_key(provider, key):
     if not isinstance(key, str) or len(key) > 512:
         return False

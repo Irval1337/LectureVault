@@ -3,15 +3,17 @@ import { useLocation, useNavigate, Link } from 'react-router-dom'
 import { api } from '../data/api'
 import { auth, useSession, type User } from '../data/store'
 import { ConnectionSettings } from './providers'
+import { StorageSettings } from './storage'
 import { Button } from './ui/button'
 import { PageHeading } from './ui/page-heading'
 import { TabBar } from './ui/tab-bar'
 
-type Section = 'profile' | 'connections' | 'security'
+type Section = 'profile' | 'connections' | 'storage' | 'security'
 type Feedback = { area: 'profile' | 'security' | 'account'; error?: string; notice?: string }
 const sections: { value: Section; label: string }[] = [
   { value: 'profile', label: 'Профиль' },
   { value: 'connections', label: 'Подключения' },
+  { value: 'storage', label: 'Хранилище' },
   { value: 'security', label: 'Безопасность' },
 ]
 
@@ -79,6 +81,7 @@ export function SettingsPage() {
         </form>
       </section>}
       {section === 'connections' && <ConnectionSettings />}
+      {section === 'storage' && <StorageSettings />}
       {section === 'security' && <>
         <section className="settings-section">
           <h2>Пароль</h2>
@@ -108,7 +111,8 @@ export function SettingsPage() {
         </details>
       </>}
     </div>
-    {location.state?.fromGeneration && <Link className="back-link" to="/new">Вернуться к конспекту</Link>}
+    {location.state?.fromGeneration && <Link className="back-link" to={{ pathname: '/new', search: typeof location.state.generationSearch === 'string' ? location.state.generationSearch : '' }}>Вернуться к конспекту</Link>}
+    {typeof location.state?.fromNote === 'string' && <Link className="back-link" to={'/notes/' + encodeURIComponent(location.state.fromNote) + '/edit'}>Вернуться к редактору</Link>}
     <Link className="privacy-link" to="/privacy">Конфиденциальность</Link>
   </div>
 }
