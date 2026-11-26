@@ -14,7 +14,7 @@ export type JobInput = { category?: string;
   preset: 'lecture' | 'seminar'; length: 'short' | 'medium' | 'detailed'; instructions: string;
   targetWords?: number; slideLimit?: number | null; apiBase?: string; pdfName?: string; timestamps: boolean; mode?: 'mock' | 'real'; language?: 'ru' | 'en' | 'auto'; sourceAssetId?: string; pdfAssetId?: string; provider?: ProviderId; model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh'
 }
-export type Job = JobInput & { canRetry?: boolean; transcriptAssetId?: string; effortApplied?: boolean; transcriptReused?: boolean; slidesReused?: boolean; slideTextCondensed?: number; recognitionPercent?: number; stageStartedAt?: number; failedStage?: JobStatus; id: string; status: JobStatus; createdAt: number; startedAt?: number; completedAt?: number; attempt: number; createdBy?: string; error?: string; noteId?: string }
+export type Job = JobInput & { canRetry?: boolean; transcriptAssetId?: string; effortApplied?: boolean; transcriptReused?: boolean; slidesReused?: boolean; slideTextCondensed?: number; slidesPartial?: boolean; recognitionPercent?: number; stageStartedAt?: number; failedStage?: JobStatus; id: string; status: JobStatus; createdAt: number; startedAt?: number; completedAt?: number; attempt: number; createdBy?: string; error?: string; noteId?: string }
 export function reuseMaterialsUrl(job: Pick<Job, 'id' | 'courseId' | 'category'>) {
   return '/new?' + new URLSearchParams({ fromJob: job.id, course: job.courseId, folder: job.category ?? '' })
 }

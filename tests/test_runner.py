@@ -131,6 +131,28 @@ def test_media_failure_removes_temporary_audio(monkeypatch, tmp_path):
     assert not (tmp_path / 'audio.wav').exists()
 
 
+@pytest.mark.parametrize('duration', [10800, 10800.001])
+def test_video_duration_limit_is_three_hours(monkeypatch, tmp_path, duration):
+    from runner import server
+
+    calls = []
+
+    def run(argv, **_kwargs):
+        calls.append(argv)
+        return json.dumps({'format': {'duration': duration}}) if argv[0] == 'ffprobe' else ''
+
+    monkeypatch.setattr(server, 'run', run)
+    video, audio = tmp_path / 'source.mp4', tmp_path / 'audio.wav'
+    if duration == 10800:
+        assert server.normalize_audio(tmp_path, video, audio) == duration
+        assert calls[1][-3:] == ['-t', '10800', str(audio)]
+    else:
+        with pytest.raises(HTTPException) as error:
+            server.normalize_audio(tmp_path, video, audio)
+        assert error.value.detail == {'code': 'DURATION_LIMIT', 'message': 'Допустимо видео с длительностью до трёх часов.'}
+        assert len(calls) == 1
+
+
 def test_long_pdf_retains_full_text_and_page_numbers(monkeypatch, tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     from runner import server

@@ -1,6 +1,9 @@
 import hashlib
 import json
 from pathlib import Path
+from io import BytesIO
+from urllib.parse import quote
+from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -127,6 +130,35 @@ def test_empty_note_rename_conflict_export_metadata_and_restart(env):
     assert c.patch(f"/api/notes/{n['id']}", json={'title': ' ', 'markdown': '', 'revision': 2}).status_code == 422
 
 
+def test_note_archive_preserves_local_images_and_only_exports_authorized_files(env):
+    c, settings, _, _ = env
+    shared = course(c, 'shared', 'Схемы')
+    share(c, shared)
+    private = course(c, title='Личное')
+    shared_note = note(c, shared)
+    private_note = note(c, private)
+    route = f"/api/notes/{shared_note['id']}"
+    image = b'\x89PNG\r\n\x1a\nshared image'
+    img = c.post(route + '/assets', files={'file': ('моя схема.png', image)}).raise_for_status().json()['url']
+    secret = c.post(f"/api/notes/{private_note['id']}/assets",
+                    files={'file': ('private.png', b'\x89PNG\r\n\x1a\nprivate file')}).raise_for_status().json()['url']
+    markdown = f'![Схема]({img})\n\n[То же вложение]({img})\n\n[Чужой файл]({secret})'
+    c.patch(route, json={'title': 'Схема / теория', 'markdown': markdown, 'revision': 1}).raise_for_status()
+    login(c, 'reader')
+    assert c.get(f"/api/notes/{private_note['id']}/export?format=zip").status_code == 404
+    assert c.get(route + '/export').text == markdown
+    result = c.get(route + '/export?format=zip').raise_for_status()
+    assert result.headers['content-type'] == 'application/zip'
+    with ZipFile(BytesIO(result.content)) as archive:
+        title, file = archive.namelist()
+        assert title == 'Схема _ теория.md'
+        assert file == 'assets/01-моя схема.png' and archive.read(file) == image
+        exported = archive.read(title).decode()
+        assert exported == markdown.replace(img, quote(file))
+    with connect(settings) as db:
+        assert db.execute('SELECT count(*) FROM file_leases').fetchone()[0] == 0
+
+
 def test_real_membership_editor_viewer_and_revocation(env):
     c, _, author, reader = env
     cid = course(c, 'shared'); n = note(c, cid)
@@ -249,6 +281,16 @@ def test_create_note_from_saved_materials_uses_selected_model(env, monkeypatch):
     assert result['status'] == 'ready' and result['noteId'] != source['noteId']
     assert result['transcriptAssetId'] == source['transcriptAssetId'] and result['transcriptReused']
     assert result['pdfAssetId'] == source['pdfAssetId']
+    route = f"/api/notes/{result['noteId']}"
+    slide = f"/api/assets/{result['pdfAssetId']}/slides/1.jpg"
+    c.patch(route, json={'title': 'Экспорт', 'markdown': f'![Слайд]({slide})', 'revision': 1}).raise_for_status()
+    zipped = c.get(route + '/export?format=zip').raise_for_status()
+    with ZipFile(BytesIO(zipped.content)) as archive:
+        pdf_name = next(name for name in archive.namelist() if name.endswith('.pdf'))
+        assert archive.read(pdf_name) == pdf
+        transcript_name = next(name for name in archive.namelist() if name.endswith('.txt'))
+        assert archive.read(transcript_name).decode().endswith('Последняя тема.')
+        assert archive.read('Экспорт.md').decode() == f'[Слайд]({quote(pdf_name)}#page=1)'
     assert sum(endpoint == '/transcribe' for endpoint, _ in calls) == 1
     generated = [body for endpoint, body in calls if endpoint == '/generate']
     assert generated[-1]['model'] == 'gemini-flash' and generated[-1]['transcript'].endswith('Последняя тема.')
@@ -584,6 +626,176 @@ def test_category_and_icon_follow_course_access_and_preserve_markdown(env):
     login(c)
     assert c.put(path, json={'path': ''}).status_code == 200
     assert c.get('/api/state').json()['notes'][0]['category'] == ''
+
+
+def test_move_note_between_courses_preserves_shared_assets_and_versions(env):
+    c, settings, _, _ = env
+    source = course(c, 'shared', 'Исходная категория')
+    destination = course(c, title='Личная категория')
+    share(c, source)
+    c.post(f'/api/courses/{destination}/folders', json={'name': 'Архив'}).raise_for_status()
+    moved = note(c, source)
+    route = '/api/notes/' + moved['id']
+    image = b'\x89PNG\r\n\x1a\nshared image'
+    old_url = c.post(route + '/assets', files={'file': ('image.png', image)}).raise_for_status().json()['url']
+    link = f'![Схема]({old_url})'
+    other = note(c, source, link)
+    first = c.patch(route, json={'title': 'История', 'markdown': link, 'revision': moved['revision']}).raise_for_status().json()
+    latest = c.patch(route, json={'title': 'История', 'markdown': link + '\n\nИзменено.', 'revision': first['revision']}).raise_for_status().json()
+
+    c.put(route + '/category', json={'courseId': destination, 'path': 'Архив', 'existingOnly': True}).raise_for_status()
+    result = c.get(route).raise_for_status().json()
+    assert result['courseId'] == destination and result['revision'] > latest['revision']
+    assert next(n for n in c.get('/api/state').json()['notes'] if n['id'] == moved['id'])['category'] == 'Архив'
+    new_url = result['markdown'].split('(')[1].split(')')[0]
+    assert new_url != old_url and c.get(new_url).content == image
+    assert c.get(f'{route}/revisions/{first["revision"]}').json()['markdown'] == f'![Схема]({new_url})'
+    restored = c.post(f'{route}/revisions/{first["revision"]}/restore',
+                      json={'revision': result['revision']}).raise_for_status().json()
+    assert restored['markdown'] == f'![Схема]({new_url})'
+    with connect(settings) as db:
+        assert db.execute('SELECT count(DISTINCT path),count(*) FROM assets').fetchone()[:] == (1, 2)
+    login(c, 'reader')
+    assert c.get(route).status_code == 404
+    assert c.get(new_url).status_code == 404
+    assert c.get('/api/notes/' + other['id']).json()['markdown'] == link
+    assert c.get(old_url).content == image
+
+
+def test_move_to_another_course_requires_rights_on_both_sides(env):
+    c, _, _, _ = env
+    source = course(c, 'shared', 'Общая категория')
+    owner_note = note(c, source)
+    share(c, source, 'editor')
+    login(c, 'reader')
+    own_note = note(c, source)
+    private = course(c, title='Личная категория редактора')
+    assert c.put(f'/api/notes/{owner_note["id"]}/category', json={'courseId': private, 'path': ''}).status_code == 403
+    assert c.put(f'/api/notes/{own_note["id"]}/category', json={'courseId': private, 'path': 'Нет такой папки'}).status_code == 404
+    c.put(f'/api/notes/{own_note["id"]}/category', json={'courseId': private, 'path': ''}).raise_for_status()
+    login(c)
+    assert c.get(f'/api/notes/{own_note["id"]}').status_code == 404
+    assert c.put(f'/api/notes/{owner_note["id"]}/category', json={'courseId': private, 'path': ''}).status_code == 404
+
+
+def test_move_root_under_another_category_keeps_files_and_queue(env):
+    c, settings, _, _ = env
+    source = course(c, title='Алгебра')
+    target = course(c, title='Математика')
+    for root, name in [(source, 'Лекции'), (target, 'Архив')]:
+        c.post(f'/api/courses/{root}/folders', json={'name': name}).raise_for_status()
+    c.put(f'/api/courses/{source}/icon', json={'icon': 'math'}).raise_for_status()
+    c.put(f'/api/courses/{source}/icon', json={'path': 'Лекции', 'icon': 'book'}).raise_for_status()
+    overview = note(c, source)
+    note_url = f"/api/notes/{overview['id']}"
+    image = b'\x89PNG\r\n\x1a\nimage in root'
+    file_url = c.post(note_url + '/assets', files={'file': ('root.png', image)}).raise_for_status().json()['url']
+    markdown = f'![Схема]({file_url})'
+    c.patch(note_url, json={'title': 'Обзор', 'markdown': markdown, 'revision': overview['revision']}).raise_for_status()
+    payload = {'courseId': source, 'category': 'Лекции', 'mode': 'mock', 'title': 'Запись',
+               'sourceType': 'url', 'sourceName': 'https://example.com/video'}
+    c.post('/api/jobs', data={'metadata': json.dumps(payload)}).raise_for_status()
+
+    move_url = f'/api/courses/{source}/location'
+    assert c.put(move_url, json={'courseId': source, 'parent': 'Лекции'}).status_code == 422
+    destination = {'courseId': target, 'parent': 'Архив'}
+    result = c.put(move_url, json=destination).raise_for_status().json()
+    assert result == {'courseId': target, 'path': 'Архив/Алгебра'}
+    run_job(settings, claim(settings))
+    state = c.get('/api/state').json()
+    assert [row['id'] for row in state['courses']] == [target]
+    assert state['courses'][0]['folderIcons'] == {'Архив/Алгебра': 'math', 'Архив/Алгебра/Лекции': 'book'}
+    assert {row['category'] for row in state['notes']} == {'Архив/Алгебра', 'Архив/Алгебра/Лекции'}
+    assert state['jobs'][0]['courseId'] == target and state['jobs'][0]['category'] == 'Архив/Алгебра/Лекции'
+    assert c.get(note_url).json()['markdown'] == markdown
+    assert c.get(file_url).content == image
+    with connect(settings) as db:
+        assert list(db.execute('PRAGMA foreign_key_check')) == []
+        assert db.execute('SELECT course_id FROM assets').fetchone()[0] == target
+
+
+def test_move_branch_checks_access_and_shares_one_physical_attachment(env):
+    c, settings, _, reader = env
+    source = course(c, 'shared', 'Темы')
+    target = course(c, title='Личное')
+    branch = 'Темы_1%'
+    for name, parent in [(branch, ''), ('Задачи', branch), ('Другое', '')]:
+        c.post(f'/api/courses/{source}/folders', json={'name': name, 'parent': parent}).raise_for_status()
+    share(c, source, 'editor')
+    moved = c.post('/api/notes', json={'courseId': source, 'category': branch + '/Задачи'}).raise_for_status().json()
+    route = f"/api/notes/{moved['id']}"
+    image = b'\x89PNG\r\n\x1a\nshared in branch'
+    old_url = c.post(route + '/assets', files={'file': ('scheme.png', image)}).raise_for_status().json()['url']
+    link = f'![Схема]({old_url})'
+    stationary = note(c, source, link)
+    inside = c.post('/api/notes', json={'courseId': source, 'category': branch, 'markdown': link}).raise_for_status().json()
+    first = c.patch(route, json={'title': 'История', 'markdown': link, 'revision': moved['revision']}).raise_for_status().json()
+    c.patch(route, json={'title': 'История', 'markdown': link + '\n\nГотово', 'revision': first['revision']}).raise_for_status()
+    move_url = f'/api/courses/{source}/location'
+    destination = {'path': branch, 'courseId': target}
+    login(c, 'reader')
+    assert c.put(move_url, json=destination).status_code == 403
+    login(c)
+    assert c.put(move_url, json={**destination, 'courseId': source, 'parent': branch + '/Задачи'}).status_code == 422
+    payload = {'courseId': source, 'category': branch, 'mode': 'mock', 'title': 'Запись',
+               'sourceType': 'url', 'sourceName': 'https://example.com/video'}
+    c.post('/api/jobs', data={'metadata': json.dumps(payload)}).raise_for_status()
+    running = claim(settings)
+    assert c.put(move_url, json=destination).status_code == 409
+    same_root = c.put(move_url, json={**destination, 'courseId': source, 'parent': 'Другое'}).raise_for_status().json()
+    run_job(settings, running)
+    destination['path'] = same_root['path']
+    confirmation = c.put(move_url, json=destination)
+    assert confirmation.status_code == 409 and confirmation.json()['detail']['code'] == 'CATEGORY_ACCESS_CHANGE'
+    token = confirmation.json()['detail']['confirmation']
+    c.put(f"/api/courses/{source}/members/{reader['id']}", json={'role': 'viewer'}).raise_for_status()
+    assert c.put(move_url, json={**destination, 'confirmation': token}).status_code == 409
+    confirmation = c.put(move_url, json=destination).json()['detail']['confirmation']
+    c.put(move_url, json={**destination, 'confirmation': confirmation}).raise_for_status()
+    target_notes = [row for row in c.get('/api/state').json()['notes'] if row['courseId'] == target]
+    assert {row['category'] for row in target_notes} == {branch, branch + '/Задачи'}
+    target_link = c.get(f"/api/notes/{inside['id']}").json()['markdown']
+    new_url = target_link.removeprefix('![Схема](').removesuffix(')')
+    assert new_url != old_url and c.get(new_url).content == image
+    assert c.get(route).json()['markdown'] == target_link + '\n\nГотово'
+    assert c.get(f'{route}/revisions/{first["revision"]}').json()['markdown'] == target_link
+    with connect(settings) as db:
+        assert db.execute('SELECT count(DISTINCT path),count(*) FROM assets').fetchone()[:] == (1, 2)
+    login(c, 'reader')
+    assert c.get(new_url).status_code == c.get(route).status_code == 404
+    assert c.get(old_url).content == image
+    assert c.get(f"/api/notes/{stationary['id']}").json()['markdown'] == link
+
+
+def test_promote_category_preserves_nested_notes_job_icon_and_access(env):
+    c, settings, _, _ = env
+    source = course(c, 'shared', 'Дисциплины')
+    share(c, source, 'editor')
+    for name, parent in [('Методы', ''), ('Семинары', 'Методы')]:
+        c.post(f'/api/courses/{source}/folders', json={'name': name, 'parent': parent}).raise_for_status()
+    c.put(f'/api/courses/{source}/icon', json={'path': 'Методы', 'icon': 'math'}).raise_for_status()
+    moved_note = c.post('/api/notes', json={'courseId': source, 'category': 'Методы', 'title': 'Введение'}).raise_for_status().json()
+    login(c, 'reader')
+    payload = {'courseId': source, 'category': 'Методы/Семинары', 'mode': 'mock', 'title': 'Запись',
+               'sourceType': 'url', 'sourceName': 'https://example.com/video'}
+    c.post('/api/jobs', data={'metadata': json.dumps(payload)}).raise_for_status()
+    url, body = f'/api/courses/{source}/location', {'courseId': None, 'path': 'Методы'}
+    assert c.put(url, json=body).status_code == 403
+    login(c)
+    duplicate = course(c, title='МЕТОДЫ')
+    assert c.put(url, json=body).status_code == 409
+    c.delete(f'/api/courses/{duplicate}').raise_for_status()
+    result = c.put(url, json=body).raise_for_status().json()
+    assert result['path'] == ''
+    run_job(settings, claim(settings))
+    login(c, 'reader')
+    state = c.get('/api/state').json()
+    promoted = next(row for row in state['courses'] if row['id'] == result['courseId'])
+    assert promoted['title'] == 'Методы' and promoted['role'] == 'editor' and promoted['icon'] == 'math'
+    assert promoted['folders'] == ['Семинары']
+    assert {row['category'] for row in state['notes'] if row['courseId'] == promoted['id']} == {'', 'Семинары'}
+    assert c.get(f"/api/notes/{moved_note['id']}").json()['courseId'] == promoted['id']
+    assert state['jobs'][0]['courseId'] == promoted['id'] and state['jobs'][0]['category'] == 'Семинары'
 
 
 def test_empty_subcategories_permissions_and_generated_note_destination(env):

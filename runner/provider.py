@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from backend.providers import (ANTHROPIC_BASE, DETAILED_GENERATION_SECONDS, DETAILED_REQUIRED_TOKEN_BUDGET,
                                EFFORTS, MAX_NOTE_CHARS, MAX_SLIDE_IMAGE_BYTES, MAX_SLIDE_IMAGES, OPENAI_BASE,
-                               PROVIDERS, valid_model, valid_api_key)
+                               PROVIDERS, SLIDE_ANALYSIS_TIMEOUT, valid_model, valid_api_key)
 from . import compatible
 from .common import auth, fail, run
 from .note_prompts import SLIDE_DESCRIPTION, note_instructions
@@ -819,7 +819,10 @@ def describe_slides_with_model(body, snapshot=None):
     if not body.slideImages:
         fail('INVALID_SLIDE', 'Добавьте изображения страниц презентации.')
     config, option = generation_context(body, snapshot)
-    pages = describe_batch(body, config, option, body.slideImages, time.monotonic() + 210)
+    if 'low' in option.get('efforts', ()):
+        body = body.model_copy(update={'effort': 'low'})
+    deadline = time.monotonic() + min(SLIDE_ANALYSIS_TIMEOUT, 120 + 30 * len(body.slideImages))
+    pages = describe_batch(body, config, option, body.slideImages, deadline)
     slides = '\n\n'.join(f"[Слайд {item['page']}]\n{item['text']}" for item in pages)
     return {'slides': slides, 'pages': pages}
 

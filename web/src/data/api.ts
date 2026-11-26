@@ -1,5 +1,5 @@
 export class ApiError extends Error {
-  constructor(message: string, public status: number, public field?: string, public code?: string) { super(message) }
+  constructor(message: string, public status: number, public field?: string, public code?: string, public confirmation?: string) { super(message) }
 }
 
 export async function api<T = unknown>(path: string, options: RequestInit = {}): Promise<T> {
@@ -10,7 +10,7 @@ export async function api<T = unknown>(path: string, options: RequestInit = {}):
   if (!response.ok) {
     const result = await response.json().catch(() => ({}))
     const detail = result.detail
-    throw new ApiError(typeof detail === 'string' ? detail : typeof detail?.message === 'string' ? detail.message : response.status === 413 ? 'Файл превышает допустимый размер.' : 'Не удалось выполнить запрос. Проверьте введённые данные.', response.status, typeof detail?.field === 'string' ? detail.field : undefined, detail?.code)
+    throw new ApiError(typeof detail === 'string' ? detail : typeof detail?.message === 'string' ? detail.message : response.status === 413 ? 'Файл превышает допустимый размер.' : 'Не удалось выполнить запрос. Проверьте введённые данные.', response.status, typeof detail?.field === 'string' ? detail.field : undefined, detail?.code, typeof detail?.confirmation === 'string' ? detail.confirmation : undefined)
   }
   return response.json()
 }

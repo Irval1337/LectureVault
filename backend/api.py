@@ -14,7 +14,7 @@ from typing import Literal
 from urllib.parse import quote, urlparse
 
 from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
@@ -22,10 +22,11 @@ from fastapi.exceptions import RequestValidationError
 
 from .config import Settings
 from .db import (connect, course_json, initialize, job_json, note_asset_ids,
-                 note_asset_reference, note_json, now, uid)
+                 note_asset_reference, note_json, now, replace_note_asset_ids, uid)
 from .media import (MAX_TRANSCRIPT_BYTES, Upload, discard_job_video,
                     index_matching_legacy_uploads, media_result, register_upload, regular_upload,
                     remove_asset, storage_usage, upload_charge, queue_file_cleanup)
+from .note_export import filename as export_filename, localized_markdown, open_asset_fd, stream_archive
 from .providers import CATALOG, MAX_NOTE_CHARS, PROVIDERS, ProviderId, valid_api_key, valid_options
 from .auth import install_auth, public_user, email_address, throttle, consume_limit, PasswordInput, password_matches
 
@@ -285,14 +286,18 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(422, 'Введите название категории.')
         with connect(settings) as db:
             db.execute('BEGIN IMMEDIATE')
-            if db.execute('SELECT count(*) FROM courses WHERE owner_id=?', (user_id,)).fetchone()[0] >= 100:
-                raise HTTPException(422, 'Не более 100 собственных категорий.')
-            titles = db.execute('SELECT title FROM courses WHERE owner_id=?', (user_id,))
-            if any(row['title'].casefold() == title.casefold() for row in titles):
-                raise HTTPException(409, 'Категория с таким названием уже существует.')
-            course_id = uid()
-            db.execute('INSERT INTO courses VALUES (?,?,?,?,?)', (course_id, title, body.workspace, user_id, now()))
+            course_id = insert_course(db, title, body.workspace, user_id)
         return {'id': course_id}
+
+    def insert_course(db, title, workspace, user_id):
+        titles = db.execute('SELECT title FROM courses WHERE owner_id=?', (user_id,)).fetchall()
+        if len(titles) >= 100:
+            raise HTTPException(422, 'Не более 100 собственных категорий.')
+        if any(row['title'].casefold() == title.casefold() for row in titles):
+            raise HTTPException(409, 'В библиотеке уже есть категория с таким названием.')
+        course_id = uid()
+        db.execute('INSERT INTO courses VALUES (?,?,?,?,?)', (course_id, title, workspace, user_id, now()))
+        return course_id
 
     @app.post('/api/courses/{course_id}/invite')
     def invite_link(course_id: str, body: dict, user_id=Depends(user)):
@@ -637,20 +642,317 @@ def create_app(settings: Settings | None = None):
                               WHERE course_id=? AND json_extract(payload,'$.category')=?""", (new, course_id, old))
         return {'path': destination}
 
+    def inside_branch(path, branch):
+        return not branch or path == branch or path.startswith(branch + '/')
+
+    def category_access_confirmation(db, source, target, path, parent):
+        def sharing(course):
+            if course['workspace'] != 'shared':
+                return [], None
+            members = db.execute('SELECT user_id,role FROM members WHERE course_id=? ORDER BY user_id', (course['id'],))
+            invite = db.execute('SELECT digest FROM course_invites WHERE course_id=? AND expires>?', (course['id'], now())).fetchone()
+            return [tuple(member) for member in members], invite['digest'] if invite else None
+
+        source_members, source_invite = sharing(source)
+        target_members, target_invite = sharing(target)
+        access_changes = source['workspace'] != target['workspace'] or source_members != target_members or target_invite
+        invite_ends = source_invite and not path
+        if not access_changes and not invite_ends:
+            return None
+        messages = []
+        if access_changes:
+            messages.append('Перемещённая ветка получит права доступа категории назначения.')
+        if invite_ends:
+            messages.append('Пригласительная ссылка исходной категории перестанет действовать.')
+        snapshot = (source['id'], path, target['id'], parent, source['workspace'], target['workspace'],
+                    source_members, target_members, source_invite, target_invite)
+        return {
+            'code': 'CATEGORY_ACCESS_CHANGE',
+            'message': ' '.join(messages),
+            'confirmation': hashlib.sha256(json.dumps(snapshot).encode()).hexdigest(),
+        }
+
+    @app.put('/api/courses/{course_id}/location')
+    def move_category(course_id: str, body: dict, user_id=Depends(user)):
+        path = '/'.join(folder_parts(body.get('path', '')))
+        parent = '/'.join(folder_parts(body.get('parent', '')))
+        target_id = body.get('courseId')
+        promote = 'courseId' in body and target_id is None
+        if not promote and (not isinstance(target_id, str) or not target_id):
+            raise HTTPException(422, 'Выберите категорию назначения.')
+        if promote and (not path or parent):
+            raise HTTPException(422, 'Выберите вложенную категорию для переноса в корень библиотеки.')
+        with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
+            source, _ = access(db, course_id, user_id, owner=True)
+            check_folder(db, course_id, path)
+            name = path.rsplit('/', 1)[-1] if path else source['title']
+            if promote:
+                target_id = insert_course(db, name, source['workspace'], user_id)
+                if source['workspace'] == 'shared':
+                    db.execute('INSERT INTO members SELECT ?,user_id,role FROM members WHERE course_id=?', (target_id, course_id))
+            target, _ = access(db, target_id, user_id, owner=True)
+            check_folder(db, target_id, parent)
+            same_course = target_id == course_id
+            if same_course and inside_branch(parent, path):
+                raise HTTPException(422, 'Категорию нельзя вложить в саму себя или в её подкатегорию.')
+            if '/' in name:
+                raise HTTPException(422, 'Перед переносом уберите косую черту из названия категории.')
+            destination = '' if promote else '/'.join(filter(None, [parent, name]))
+            if same_course and destination == path:
+                return {'courseId': target_id, 'path': path}
+
+            folders = {row['path']: row['icon'] for row in db.execute(
+                'SELECT path,icon FROM category_folders WHERE course_id=?', (course_id,)) if inside_branch(row['path'], path)}
+            if not path:
+                icon = db.execute('SELECT icon FROM course_icons WHERE course_id=?', (course_id,)).fetchone()
+                folders[''] = icon['icon'] if icon else 'folder'
+            target_paths = {row['path'] for row in db.execute('SELECT path FROM category_folders WHERE course_id=?', (target_id,))}
+            if same_course:
+                target_paths.difference_update(folders)
+            if len(target_paths) + len(folders) - int(promote) > 500:
+                raise HTTPException(409, 'Достигнут предел вложенных категорий.')
+            locations = {old: '/'.join(filter(None, [destination, old[len(path):].lstrip('/')])) for old in folders}
+            for new in locations.values():
+                folder_parts(new)
+                if new in target_paths:
+                    raise HTTPException(409, 'В категории назначения уже есть подкатегория с таким названием.')
+
+            note_paths = {row['id']: row['category'] for row in db.execute(
+                """SELECT n.id,coalesce(c.path,'') AS category FROM notes n
+                    LEFT JOIN note_categories c ON c.note_id=n.id WHERE n.course_id=?""", (course_id,))}
+            moving_notes = {note_id: locations.get(old, destination) for note_id, old in note_paths.items()
+                            if not path or old in locations}
+            jobs = [(row, json.loads(row['payload'])) for row in db.execute(
+                'SELECT id,status,note_id,payload,created_by FROM jobs WHERE course_id=?', (course_id,))]
+            writers = {target['owner_id']}
+            if not same_course and target['workspace'] == 'shared':
+                writers.update(row['user_id'] for row in db.execute(
+                    "SELECT user_id FROM members WHERE course_id=? AND role='editor'", (target_id,)))
+            moves = []
+            for row, payload in jobs:
+                old = note_paths.get(row['note_id'], payload.get('category', ''))
+                if not path or old in locations:
+                    if not same_course:
+                        if row['status'] in ('acquiring', 'transcribing', 'preparing', 'generating') or payload.get('videoArchive') == 'processing':
+                            raise HTTPException(409, 'В этой ветке обрабатываются материалы. Повторите перенос после завершения обработки.')
+                        if row['status'] in ('queued', 'waiting_generation') and row['created_by'] not in writers:
+                            raise HTTPException(409, 'Автор задания в очереди не может писать в категорию назначения. Дождитесь завершения задания.')
+                    moves.append((row, payload, locations.get(old, destination)))
+
+            replacements = {}
+            if not same_course:
+                confirmation = category_access_confirmation(db, source, target, path, parent)
+                if confirmation and body.get('confirmation') != confirmation['confirmation']:
+                    raise HTTPException(409, confirmation)
+                if path:
+                    replacements = move_branch_assets(db, course_id, target_id, moving_notes, jobs, moves)
+                else:
+                    db.execute('UPDATE assets SET course_id=? WHERE course_id=?', (target_id, course_id))
+
+            db.executemany('DELETE FROM category_folders WHERE course_id=? AND path=?',
+                           ((course_id, old) for old in folders if old))
+            db.executemany('INSERT INTO category_folders(course_id,path,icon) VALUES (?,?,?)',
+                           ((target_id, new, folders[old]) for old, new in locations.items() if new))
+            if promote and folders[path] != 'folder':
+                db.execute('INSERT INTO course_icons VALUES (?,?)', (target_id, folders[path]))
+            db.executemany('DELETE FROM note_categories WHERE note_id=?',
+                           ((note_id,) for note_id, new in moving_notes.items() if not new))
+            db.executemany('INSERT OR REPLACE INTO note_categories VALUES (?,?)',
+                           ((note_id, new) for note_id, new in moving_notes.items() if new))
+            if not same_course:
+                if path:
+                    db.executemany('UPDATE notes SET course_id=? WHERE id=?', ((target_id, note_id) for note_id in moving_notes))
+                else:
+                    db.execute('UPDATE notes SET course_id=? WHERE course_id=?', (target_id, course_id))
+            for row, payload, new in moves:
+                payload.update(courseId=target_id, category=new)
+                for key in job_asset_keys:
+                    if payload.get(key) in replacements:
+                        payload[key] = replacements[payload[key]]
+                db.execute('UPDATE jobs SET course_id=?,payload=? WHERE id=?', (target_id, json.dumps(payload), row['id']))
+            if not path:
+                db.execute('DELETE FROM members WHERE course_id=?', (course_id,))
+                db.execute('DELETE FROM courses WHERE id=?', (course_id,))
+        return {'courseId': target_id, 'path': destination}
+
     @app.put('/api/notes/{note_id}/category')
     def move_note(note_id: str, body: dict, user_id=Depends(user)):
         parts = folder_parts(body.get('path'))
+        path = '/'.join(parts)
         with connect(settings) as db:
             db.execute('BEGIN IMMEDIATE')
-            note = entity(db, 'notes', note_id, user_id, write=True)
-            if body.get('existingOnly'):
-                check_folder(db, note['course_id'], '/'.join(parts))
+            note, source, source_role = note_for_edit(db, note_id, user_id)
+            target_id = body.get('courseId', source['id'])
+            if not isinstance(target_id, str) or not target_id:
+                raise HTTPException(422, 'Выберите категорию.')
+            if target_id != source['id']:
+                if source_role != 'owner' and note['created_by'] != user_id:
+                    raise HTTPException(403, 'Перенести заметку в другую категорию может её автор или владелец исходной категории.')
+                target, target_role = access(db, target_id, user_id, write=True)
+                check_folder(db, target_id, path)
+                transfer_note(db, note, source, target, target_role, path, user_id)
+            elif body.get('existingOnly'):
+                check_folder(db, target_id, path)
             else:
-                ensure_folders(db, note['course_id'], parts)
+                ensure_folders(db, target_id, parts)
+            if target_id == source['id'] and note['job_id']:
+                db.execute("""UPDATE jobs SET payload=json_set(payload,'$.category',?) WHERE id=? AND course_id=? AND note_id=?""",
+                           (path, note['job_id'], target_id, note_id))
             db.execute('DELETE FROM note_categories WHERE note_id=?', (note_id,))
             if parts:
-                db.execute('INSERT INTO note_categories VALUES (?,?)', (note_id, '/'.join(parts)))
+                db.execute('INSERT INTO note_categories VALUES (?,?)', (note_id, path))
         return {'ok': True}
+
+    def asset_used_elsewhere(db, asset_id, source_id, note_id, job_id):
+        for row in db.execute('SELECT markdown FROM notes WHERE course_id=? AND id!=? AND instr(markdown,?)>0',
+                              (source_id, note_id, '/api/assets/' + asset_id)):
+            if asset_id in note_asset_ids(row['markdown']):
+                return True
+        return db.execute("""SELECT 1 FROM note_revision_assets ra JOIN notes n ON n.id=ra.note_id
+            WHERE n.course_id=:course AND n.id!=:note AND ra.asset_id=:asset
+            UNION ALL
+            SELECT 1 FROM jobs WHERE course_id=:course AND (:job IS NULL OR id!=:job) AND
+             (json_extract(payload,'$.sourceAssetId')=:asset OR json_extract(payload,'$.pdfAssetId')=:asset
+              OR json_extract(payload,'$.transcriptAssetId')=:asset) LIMIT 1""",
+                          dict(course=source_id, note=note_id, job=job_id, asset=asset_id)).fetchone() is not None
+
+    job_asset_keys = ('sourceAssetId', 'pdfAssetId', 'transcriptAssetId')
+
+    def copy_asset_reference(db, asset, target_id, note_id, job_id, uploader):
+        copy_id = uid()
+        db.execute("""INSERT INTO assets(id,course_id,note_id,job_id,name,mime,path,size,sha256,
+            transcript_language,legacy_source_sha256,created_by)
+            SELECT ?,?,?,?,name,mime,path,size,sha256,transcript_language,legacy_source_sha256,?
+            FROM assets WHERE id=?""", (copy_id, target_id, note_id, job_id, uploader, asset['id']))
+        db.execute("""INSERT INTO transcript_recognition SELECT ?,audio_sha256,language,engine
+            FROM transcript_recognition WHERE asset_id=?""", (copy_id, asset['id']))
+        return copy_id
+
+    def move_branch_assets(db, source_id, target_id, moving_notes, jobs, moves):
+        source_jobs = {row['id'] for row, _ in jobs}
+        moving_jobs = {row['id'] for row, _, _ in moves}
+        inside_assets, outside_assets = set(), set()
+        for row, payload in jobs:
+            refs = inside_assets if row['id'] in moving_jobs else outside_assets
+            refs.update(payload[key] for key in job_asset_keys if payload.get(key))
+        notes = db.execute("SELECT id,markdown FROM notes WHERE course_id=? AND instr(markdown,'/api/assets/')>0",
+                           (source_id,)).fetchall()
+        for row in notes:
+            refs = inside_assets if row['id'] in moving_notes else outside_assets
+            refs.update(note_asset_ids(row['markdown']))
+        versions = db.execute("""SELECT ra.note_id,ra.asset_id FROM note_revision_assets ra
+            JOIN notes n ON n.id=ra.note_id WHERE n.course_id=?""", (source_id,))
+        for row in versions:
+            refs = inside_assets if row['note_id'] in moving_notes else outside_assets
+            refs.add(row['asset_id'])
+
+        replacements = {}
+        assets = db.execute('SELECT * FROM assets WHERE course_id=?', (source_id,)).fetchall()
+        for asset in assets:
+            asset_id, note_id, job_id = asset['id'], asset['note_id'], asset['job_id']
+            owned_by_branch = note_id in moving_notes or job_id in moving_jobs
+            if not owned_by_branch and asset_id not in inside_assets:
+                continue
+            shared = (asset_id in outside_assets or (note_id and note_id not in moving_notes)
+                      or (job_id in source_jobs and job_id not in moving_jobs))
+            if shared:
+                attached_note = note_id if note_id in moving_notes and asset['mime'].startswith('image/') else None
+                replacements[asset_id] = copy_asset_reference(db, asset, target_id, attached_note, job_id, asset['created_by'])
+                if note_id in moving_notes:
+                    db.execute('UPDATE assets SET note_id=NULL WHERE id=?', (asset_id,))
+            else:
+                db.execute('UPDATE assets SET course_id=? WHERE id=?', (target_id, asset_id))
+
+        if replacements:
+            for row in notes:
+                if row['id'] not in moving_notes:
+                    continue
+                markdown = replace_note_asset_ids(row['markdown'], replacements)
+                if markdown != row['markdown']:
+                    db.execute('UPDATE notes SET markdown=?,revision=revision+1 WHERE id=?', (markdown, row['id']))
+            bindings = {'notes': json.dumps(list(moving_notes)), 'assets': json.dumps(replacements)}
+            versions = db.execute("""SELECT DISTINCT r.note_id,r.revision,r.markdown FROM note_revisions r
+                JOIN note_revision_assets ra ON ra.note_id=r.note_id AND ra.revision=r.revision
+                WHERE r.note_id IN (SELECT value FROM json_each(:notes))
+                  AND ra.asset_id IN (SELECT key FROM json_each(:assets))""", bindings).fetchall()
+            db.executemany('UPDATE note_revisions SET markdown=? WHERE note_id=? AND revision=?',
+                           ((replace_note_asset_ids(row['markdown'], replacements), row['note_id'], row['revision'])
+                            for row in versions))
+            db.execute("""UPDATE note_revision_assets AS ra SET asset_id=(
+                SELECT value FROM json_each(:assets) WHERE key=ra.asset_id)
+                WHERE note_id IN (SELECT value FROM json_each(:notes))
+                  AND asset_id IN (SELECT key FROM json_each(:assets))""", bindings)
+        return replacements
+
+    def transfer_note(db, note, source, target, target_role, path, user_id):
+        note_id, job_id = note['id'], note['job_id']
+        source_id, target_id = source['id'], target['id']
+        owner = target['owner_id']
+        changes_owner = source['owner_id'] != owner
+        job = db.execute('SELECT * FROM jobs WHERE id=? AND course_id=? AND note_id=?',
+                         (job_id, source_id, note_id)).fetchone()
+        payload = json.loads(job['payload']) if job else {}
+        if job and (job['status'] != 'ready' or payload.get('videoArchive') in ('queued', 'processing')):
+            raise HTTPException(409, 'Дождитесь завершения обработки материалов заметки.')
+        if not job:
+            job_id = None
+        versions = db.execute('SELECT revision,markdown FROM note_revisions WHERE note_id=?', (note_id,)).fetchall()
+        asset_ids = note_asset_ids(note['markdown'])
+        for version in versions:
+            asset_ids.update(note_asset_ids(version['markdown']))
+        asset_ids.update(payload[key] for key in job_asset_keys if payload.get(key))
+        assets = db.execute("""SELECT * FROM assets WHERE course_id=? AND
+            (note_id=? OR job_id=? OR id IN (SELECT value FROM json_each(?)))""",
+                            (source_id, note_id, job_id, json.dumps(sorted(asset_ids)))).fetchall()
+
+        before = storage_usage(db, owner)
+        editor_percent, editor_before = editor_usage(db, owner) if target_role == 'editor' else (0, 0)
+        replacements = {}
+        for asset in assets:
+            asset_id = asset['id']
+            uploader = user_id if changes_owner else asset['created_by']
+            if (asset['note_id'] not in (None, note_id) or asset['job_id'] not in (None, job_id)
+                    or (source['owner_id'] != user_id and asset['created_by'] != user_id)
+                    or asset_used_elsewhere(db, asset_id, source_id, note_id, job_id)):
+                # Keep an independent permission reference to the same bytes when the source still uses them.
+                replacements[asset_id] = copy_asset_reference(
+                    db, asset, target_id, note_id if asset['mime'].startswith('image/') else None,
+                    (job_id or asset['job_id']) if asset['job_id'] else None, uploader)
+                db.execute('UPDATE assets SET note_id=NULL WHERE id=? AND note_id=?', (asset_id, note_id))
+            else:
+                db.execute('UPDATE assets SET course_id=?,created_by=? WHERE id=?', (target_id, uploader, asset_id))
+
+        markdown = replace_note_asset_ids(note['markdown'], replacements)
+        if changes_owner:
+            check_note_quota(db, target_id, markdown)
+        db.execute('UPDATE notes SET course_id=?,markdown=?,revision=revision+? WHERE id=?',
+                   (target_id, markdown, int(markdown != note['markdown']), note_id))
+        for old, new in replacements.items():
+            db.execute('UPDATE note_revision_assets SET asset_id=? WHERE note_id=? AND asset_id=?', (new, note_id, old))
+        for version in versions:
+            updated = replace_note_asset_ids(version['markdown'], replacements)
+            if updated != version['markdown']:
+                db.execute('UPDATE note_revisions SET markdown=? WHERE note_id=? AND revision=?',
+                           (updated, note_id, version['revision']))
+        if job:
+            payload.update(courseId=target_id, category=path)
+            for key in job_asset_keys:
+                if payload.get(key) in replacements:
+                    payload[key] = replacements[payload[key]]
+            db.execute('UPDATE jobs SET course_id=?,payload=? WHERE id=?', (target_id, json.dumps(payload), job_id))
+
+        after = storage_usage(db, owner)
+        used_before = before['stored'] + before['reserved']
+        used_after = after['stored'] + after['reserved']
+        if used_after > max(used_before, settings.user_quota):
+            raise HTTPException(507, {'code': 'STORAGE_QUOTA', 'message': 'В категории назначения недостаточно места для вложений.'})
+        if target_role == 'editor' and editor_usage(db, owner)[1] > max(editor_before, settings.user_quota * editor_percent // 100):
+            raise HTTPException(507, {'code': 'STORAGE_QUOTA', 'message': 'Лимит загрузок редакторов в категории назначения исчерпан.'})
+        if changes_owner and db.execute("""SELECT coalesce(sum(r.size),0) FROM note_revisions r
+            JOIN notes n ON n.id=r.note_id JOIN courses c ON c.id=n.course_id WHERE c.owner_id=?""",
+                                        (owner,)).fetchone()[0] > 25 * 1024 * 1024:
+            raise HTTPException(507, 'В категории назначения недостаточно места для истории заметки.')
 
     @app.put('/api/courses/{course_id}/icon')
     def course_icon(course_id: str, body: dict, user_id=Depends(user)):
@@ -671,10 +973,57 @@ def create_app(settings: Settings | None = None):
         return {'ok': True}
 
     @app.get('/api/notes/{note_id}/export')
-    def export_note(note_id: str, user_id=Depends(user)):
+    def export_note(note_id: str, format: Literal['md', 'zip'] = 'md', user_id=Depends(user)):
+        if format == 'zip':
+            return export_note_archive(note_id, user_id)
         with connect(settings) as db:
             note = entity(db, 'notes', note_id, user_id)
-        return Response(note['markdown'], media_type='text/markdown; charset=utf-8', headers={'Content-Disposition': f"attachment; filename=note.md; filename*=UTF-8''{quote(note['title'], safe='')}.md"})
+        quoted = quote(note['title'], safe='')
+        return Response(note['markdown'], media_type='text/markdown; charset=utf-8',
+                        headers={'Content-Disposition': f"attachment; filename=note.md; filename*=UTF-8''{quoted}.md"})
+
+    def export_note_archive(note_id, user_id):
+        entries, names, leases = {}, {}, []
+        with connect(settings) as db:
+            db.execute('BEGIN IMMEDIATE')
+            note = entity(db, 'notes', note_id, user_id)
+            refs = note_asset_ids(note['markdown'])
+            job = db.execute('SELECT payload FROM jobs WHERE id=? AND note_id=? AND course_id=?',
+                             (note['job_id'], note_id, note['course_id'])).fetchone()
+            if job:
+                payload = json.loads(job['payload'])
+                refs.update(payload[key] for key in ('pdfAssetId', 'transcriptAssetId') if payload.get(key))
+            rows = db.execute("""SELECT id,name,path FROM assets WHERE course_id=?
+                AND (mime LIKE 'image/%' OR mime IN ('application/pdf','text/plain'))
+                AND (note_id=? OR id IN (SELECT value FROM json_each(?))) ORDER BY name,id""",
+                              (note['course_id'], note_id, json.dumps(sorted(refs))))
+            for row in rows:
+                path = Path(row['path'])
+                if path not in entries:
+                    if not any(regular_upload(path, root) for root in (settings.data, settings.jobs)):
+                        continue
+                    name = export_filename(row['name'], 'Файл')
+                    entries[path] = f'assets/{len(entries) + 1:02d}-{name}'
+                    leases.append((uid(), str(path)))
+                names[row['id']] = entries[path]
+            expiration = now() + 3600_000
+            db.executemany('INSERT INTO file_leases VALUES (?,?,?)', ((lease, path, expiration) for lease, path in leases))
+
+        title = export_filename(note['title'], 'Заметка')
+        markdown = localized_markdown(note['markdown'], names)
+
+        def download():
+            try:
+                yield from stream_archive(title, markdown, ((name, path) for path, name in entries.items()))
+            finally:
+                if leases:
+                    with connect(settings) as db:
+                        db.executemany('DELETE FROM file_leases WHERE id=?', ((lease,) for lease, _ in leases))
+
+        return StreamingResponse(download(), media_type='application/zip', headers={
+            'Content-Disposition': f"attachment; filename=note.zip; filename*=UTF-8''{quote(title, safe='')}.zip",
+            'X-Accel-Buffering': 'no',
+        })
 
     async def store_file(file: UploadFile, directory: Path, limit: int, kind: str):
         field = 'pdf' if kind == 'pdf' else 'source'
@@ -731,7 +1080,8 @@ def create_app(settings: Settings | None = None):
             await run_in_threadpool(index_matching_legacy_uploads, settings, course_id, item, settings.data / 'assets')
             with connect(settings) as db:
                 db.execute('BEGIN IMMEDIATE')
-                entity(db, 'notes', note_id, user_id, write=True)
+                current_note = entity(db, 'notes', note_id, user_id, write=True)
+                course_id = current_note['course_id']
                 check_quota(db, user_id, course_id, uploads=(item,))
                 register_upload(db, settings, course_id, note_id, None, item)
                 db.execute('UPDATE assets SET created_by=? WHERE id=?', (user_id, item.id))
@@ -755,7 +1105,7 @@ def create_app(settings: Settings | None = None):
                 raise HTTPException(404)
             db.execute('INSERT INTO file_leases VALUES (?,?,?)', (lease, row['path'], now() + 120_000))
         try:
-            result, _ = media_result(settings, rpc, asset_id, '/slide-preview', {'jobId': row['job_id'], 'page': page}, timeout=45, asset=row)
+            result, _ = media_result(settings, rpc, asset_id, '/slide-preview', {'jobId': row['job_id'], 'page': page}, timeout=105, asset=row)
             with connect(settings) as db:
                 entity(db, 'assets', asset_id, user_id)
         except JobError as error:
@@ -780,12 +1130,9 @@ def create_app(settings: Settings | None = None):
             if not any(regular_upload(path, root) for root in (settings.data, settings.jobs)):
                 raise HTTPException(404, 'Файл недоступен.')
             try:
-                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                fd = open_asset_fd(path)
             except OSError:
                 raise HTTPException(404, 'Файл недоступен.') from None
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                os.close(fd)
-                raise HTTPException(404, 'Файл недоступен.')
         return PinnedFileResponse(fd, media_type=row['mime'], filename=row['name'],
                                   content_disposition_type='inline' if row['mime'].startswith('image/') else 'attachment',
                                   headers={'Cache-Control': 'private, no-store'})
@@ -1100,7 +1447,7 @@ def create_app(settings: Settings | None = None):
                     raise HTTPException(409, 'Исходник недоступен. Загрузите видео в новое задание.')
                 if db.execute("SELECT count(*) FROM jobs WHERE status NOT IN ('ready','failed','cancelled') AND created_by=?", (user_id,)).fetchone()[0] >= 10:
                     raise HTTPException(429, 'Не более 10 активных заданий на пользователя.')
-                db.execute("UPDATE jobs SET payload=json_remove(payload,'$.failedStage','$.stageStartedAt','$.transcriptReused','$.slidesReused','$.slideTextCondensed'),status='queued',created_at=?,started_at=NULL,completed_at=NULL,error=NULL,error_code=NULL,attempt=attempt+1 WHERE id=? AND status='failed'", (now(), job_id))
+                db.execute("UPDATE jobs SET payload=json_remove(payload,'$.failedStage','$.stageStartedAt','$.transcriptReused','$.slidesReused','$.slideTextCondensed','$.slidesPartial'),status='queued',created_at=?,started_at=NULL,completed_at=NULL,error=NULL,error_code=NULL,attempt=attempt+1 WHERE id=? AND status='failed'", (now(), job_id))
             else:
                 raise HTTPException(409, 'Состояние задания уже изменилось.')
         return {'ok': True}

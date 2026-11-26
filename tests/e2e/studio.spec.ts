@@ -4,7 +4,7 @@ import { test, expect, headers, signIn, createCourse, capture } from './fixtures
 test('Studio reader: actual inner scroll, TOC, Escape, search, active tree and back at 1440/768/390', async ({ page, accounts }) => {
   await signIn(page, accounts.author)
   const cid = await createCourse(page.request, `Широкие материалы ${Date.now()}`)
-  const markdown = '# Широкие материалы\n\n## Таблицы\n\n| A | B | C |\n| - | - | - |\n| ' + 'long_column_'.repeat(40) + ' | Данные | Пример |\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n## Код\n\n```text\n' + 'long_command_'.repeat(70) + '\n```\n\n## Формулы\n\n$$\n\\text{' + 'WideTerm'.repeat(70) + '}\n$$\n\nInline: $\\text{' + 'InlineTerm'.repeat(50) + '}$\n\n## Изображение\n\n![Материал](/demo-replication.svg)'
+  const markdown = '# Широкие материалы\n\n## Таблицы\n\n| A | B | C |\n| - | - | - |\n| ' + 'long_column_'.repeat(40) + ' | Данные | Пример |\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n## Код\n\n```text\n' + 'long_command_'.repeat(70) + '\n```\n\n## Формулы\n\n$$\n\\text{' + 'WideTerm'.repeat(70) + '}\n$$\n\nInline: $\\text{' + 'InlineTerm'.repeat(50) + '}$\n\nЗначение $v_j$ и длина $\\ell_j$.\n\n## Изображение\n\n![Материал](/demo-replication.svg)'
   const note = await (await page.request.post('/api/notes', { headers, data: { courseId: cid, title: 'Широкие материалы', markdown } })).json()
   await page.goto(`/notes/${note.id}`); await expect(page.locator('.quartz-reader article')).toBeVisible()
   await page.getByRole('button', { name: 'Скрыть проводник', exact: true }).focus()
@@ -20,6 +20,12 @@ test('Studio reader: actual inner scroll, TOC, Escape, search, active tree and b
       await expect(block).toHaveAttribute('data-horizontal-scroll', '')
       await block.evaluate(element => { element.scrollLeft = 0 }); await block.focus(); await page.keyboard.press('ArrowRight')
       await expect.poll(() => block.evaluate(element => element.scrollLeft)).toBeGreaterThan(0)
+    }
+    const shortFormulas = page.locator('.quartz-reader article p').filter({ hasText: 'Значение' }).locator('.katex')
+    await expect(shortFormulas).toHaveCount(2)
+    for (const formula of await shortFormulas.all()) {
+      await expect(formula).toHaveCSS('overflow-x', 'visible')
+      await expect(formula).not.toHaveAttribute('data-horizontal-scroll')
     }
     await capture(page, `wide-reader-${width}`)
     if (width < 1180) {
@@ -46,7 +52,8 @@ test('explicit legacy import preserves source localStorage and exports exact Mar
   await expect(page.getByRole('status').filter({ hasText: 'Импортировано' })).toBeVisible()
   const note = (await (await page.request.get('/api/state')).json()).notes.find((n: { title: string }) => n.title === 'Импортированный текст')
   await page.goto(`/notes/${note.id}`); await expect(page.locator('.quartz-reader article')).toBeVisible()
-  const download = page.waitForEvent('download'); await page.getByRole('link', { name: 'Скачать .md', exact: true }).click()
+  await page.getByLabel('Скачать заметку', { exact: true }).click()
+  const download = page.waitForEvent('download'); await page.getByRole('link', { name: 'Скачать Markdown', exact: true }).click()
   expect(await readFile((await (await download).path())!, 'utf8')).toBe(markdown)
   expect(await page.evaluate(() => localStorage.getItem('lecturevault.library.v1'))).toBe(JSON.stringify(seed))
   await page.getByRole('link', { name: 'К категории', exact: true }).click()

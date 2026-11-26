@@ -67,8 +67,12 @@ def main():
         raise SystemExit('Non-root isolated CLI invocation required')
     home, work, temporary = map(Path, sys.argv[1:4])
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024 * 1024, 256 * 1024 * 1024))
     command = sys.argv[4:]
+    file_size_limit = 256 * 1024 * 1024
+    if command[0] == '--file-size-limit':
+        file_size_limit = int(command[1])
+        command = command[2:]
+    resource.setrlimit(resource.RLIMIT_FSIZE, (file_size_limit, file_size_limit))
     read_file = None
     if command[0] == '--read-file':
         read_file = Path(command[1])

@@ -24,6 +24,10 @@ def note_asset_ids(markdown):
     return set(_ASSET_REFERENCE.findall(markdown))
 
 
+def replace_note_asset_ids(markdown, replacements):
+    return _ASSET_REFERENCE.sub(lambda match: '/api/assets/' + replacements.get(match[1], match[1]), markdown)
+
+
 def note_asset_reference(db, course_id, asset_id):
     for note in db.execute('SELECT id,markdown FROM notes WHERE course_id=? AND instr(markdown,?)>0',
                            (course_id, '/api/assets/' + asset_id)):

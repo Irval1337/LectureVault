@@ -13,12 +13,13 @@ from .slides import embed_slides
 from .config import Settings
 from .media import collect_storage_garbage, discard_job_video, discard_prepared_audio, media_result, prepare_transcript
 from .db import connect, job_json, note_asset_reference, now, uid
-from .providers import DETAILED_GENERATION_SECONDS, MAX_NOTE_CHARS
+from .providers import DETAILED_GENERATION_SECONDS, MAX_NOTE_CHARS, MAX_SLIDE_IMAGES, MAX_SLIDE_IMAGE_BYTES, SLIDE_ANALYSIS_TIMEOUT
 
 log = logging.getLogger('lecturevault.worker')
 speech_slot = threading.Lock()
 STAGES = ['acquiring', 'transcribing', 'preparing', 'generating']
 WAITING_GENERATION = 'waiting_generation'
+PDF_TIMEOUT_CODES = {'TIMEOUT', 'RUNNER_UNAVAILABLE', 'API_TIMEOUT', 'OPENAI_TIMEOUT', 'API_LIMIT'}
 
 
 class JobError(Exception):
@@ -85,25 +86,68 @@ def visual_materials(settings, job, page_count, provider_url, selection):
     images = []
     descriptions = []
     batch_size = 0
-    for page in range(1, page_count + 1):
-        result, _ = media_result(settings, rpc, job['pdfAssetId'], '/slide-preview',
-                                 {'jobId': job['id'], 'page': page}, 45)
-        jpeg = result['jpeg']
-        if len(images) == 16 or batch_size + len(jpeg) > 8 * 1024 * 1024:
-            with connect(settings) as db:
-                check_active(db, job['id'])
-            reply = rpc(settings, provider_url, '/describe-slides', {**selection, 'slideImages': images}, 240)
-            descriptions.append(reply['slides'])
-            images, batch_size = [], 0
-        images.append({'page': page, 'jpeg': jpeg})
-        batch_size += len(jpeg)
-    if not descriptions or not images:
-        return images, '\n\n'.join(descriptions)
+    deadline = time.monotonic() + 20 * 60
+
+    def describe():
+        with connect(settings) as db:
+            check_active(db, job['id'])
+        reply = rpc(settings, provider_url, '/describe-slides', {**selection, 'slideImages': images},
+                    timeout=SLIDE_ANALYSIS_TIMEOUT + 60)
+        descriptions.append(reply['slides'])
+
+    try:
+        for page in range(1, page_count + 1):
+            if time.monotonic() >= deadline:
+                return [], '\n\n'.join(descriptions), True
+            result, _ = media_result(settings, rpc, job['pdfAssetId'], '/slide-preview',
+                                     {'jobId': job['id'], 'page': page}, 105)
+            jpeg = result['jpeg']
+            if len(images) == MAX_SLIDE_IMAGES or batch_size + len(jpeg) > MAX_SLIDE_IMAGE_BYTES:
+                describe()
+                images, batch_size = [], 0
+            images.append({'page': page, 'jpeg': jpeg})
+            batch_size += len(jpeg)
+        if not descriptions:
+            return images, '', False
+        if images:
+            describe()
+    except JobError as error:
+        if error.code not in PDF_TIMEOUT_CODES:
+            raise
+        log.warning('job=%s slide images incomplete: %s', job['id'], error.code)
+        return [], '\n\n'.join(descriptions), True
+    return [], '\n\n'.join(descriptions), False
+
+
+def pdf_materials(settings, job, provider_url, selection):
+    asset = job.get('pdfAssetId')
+    partial = False
+    try:
+        result, reused = media_result(settings, rpc, asset, '/slides',
+                                      {'jobId': job['id'], 'pdf': job.get('pdfPath', '')}, 300)
+    except JobError as error:
+        if error.code not in PDF_TIMEOUT_CODES:
+            raise
+        log.warning('job=%s PDF text incomplete: %s', job['id'], error.code)
+        partial, result, reused = True, {}, False
+        if asset:
+            try:
+                result, _ = media_result(settings, rpc, asset, '/slide-preview', {'jobId': job['id'], 'page': 0}, 105)
+            except JobError as preview_error:
+                if preview_error.code not in PDF_TIMEOUT_CODES:
+                    raise
+    slides = result.get('text', '')
+    pages = result.get('pages', 0)
+    images = []
+    if job.get('supportsImages') and asset and pages:
+        images, visual_text, visual_partial = visual_materials(settings, job, pages, provider_url, selection)
+        partial = partial or visual_partial
+        slides = '\n\n'.join(filter(None, (slides, visual_text)))
     with connect(settings) as db:
-        check_active(db, job['id'])
-    reply = rpc(settings, provider_url, '/describe-slides', {**selection, 'slideImages': images}, 240)
-    descriptions.append(reply['slides'])
-    return [], '\n\n'.join(descriptions)
+        db.execute("""UPDATE jobs SET payload=json_set(payload,'$.slidesReused',json(?),
+            '$.slideTextCondensed',?,'$.slidesPartial',json(?)) WHERE id=?""",
+                   (json.dumps(reused), int(bool(result.get('condensed'))), json.dumps(partial), job['id']))
+    return slides, pages, images
 
 
 def run_job(settings, row):
@@ -134,19 +178,7 @@ def run_job(settings, row):
             provider_url = settings.provider_url(row['created_by'])
             if job.get('pdfPath') or job.get('pdfAssetId'):
                 set_stage(settings, job_id, 'preparing')
-                result, reused = media_result(settings, rpc, job.get('pdfAssetId'), '/slides',
-                                              {'jobId': job_id, 'pdf': job.get('pdfPath', '')}, 180)
-                with connect(settings) as db:
-                    db.execute("UPDATE jobs SET payload=json_set(payload,'$.slidesReused',json(?)) WHERE id=?", (json.dumps(reused), job_id))
-                slides = result['text']
-                if result.get('condensed'):
-                    with connect(settings) as db:
-                        db.execute("UPDATE jobs SET payload=json_set(payload,'$.slideTextCondensed',1) WHERE id=?", (job_id,))
-                slide_count = result.get('pages', 0)
-                if job.get('supportsImages') and job.get('pdfAssetId'):
-                    slide_images, visual_text = visual_materials(settings, job, slide_count, provider_url, selection)
-                    if visual_text:
-                        slides = '\n\n'.join(filter(None, (slides, visual_text)))
+                slides, slide_count, slide_images = pdf_materials(settings, job, provider_url, selection)
             set_stage(settings, job_id, 'generating')
             timeout = DETAILED_GENERATION_SECONDS if job['length'] == 'detailed' and not job.get('targetWords') else 300
             material = {'transcript': transcript, 'slides': slides, 'pageCount': slide_count, 'slideImages': slide_images}

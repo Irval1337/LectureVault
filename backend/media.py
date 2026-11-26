@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .db import connect, now, uid
-from .transcript import clean_transcript
+from .transcript import AUDIO_NORMALIZATION_TIMEOUT, SPEECH_RECOGNITION_TIMEOUT, clean_transcript
 
 MAX_CACHE_BYTES = 64 * 1024 * 1024
 MAX_CACHE_ENTRIES = 2048
@@ -377,13 +377,14 @@ def prepare_transcript(settings, rpc, job, *, mark_reused=True):
         video, source_digest = job_video(settings, job)
         body = {'jobId': job['id'], 'video': video.name, 'sourceJobId': video.parent.name, 'language': language}
         try:
-            result = rpc(settings, settings.media_url, '/transcribe', {**body, 'prepareAudio': True}, timeout=420)
+            result = rpc(settings, settings.media_url, '/transcribe', {**body, 'prepareAudio': True},
+                         timeout=AUDIO_NORMALIZATION_TIMEOUT + 120)
             key = recognition_key(result, language)
             text = reuse_recognition(settings, job, source_digest, key) if key else None
             if text is None:
                 if key:
                     result = rpc(settings, settings.media_url, '/transcribe',
-                                 {**body, 'preparedAudio': key[0]}, timeout=3660)
+                                 {**body, 'preparedAudio': key[0]}, timeout=SPEECH_RECOGNITION_TIMEOUT + 60)
                     actual_key = recognition_key(result, language)
                     if not actual_key or actual_key[0] != key[0]:
                         raise JobError('AUDIO_CHANGED', 'Подготовленная звуковая дорожка изменилась.')

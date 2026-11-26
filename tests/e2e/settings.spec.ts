@@ -1,4 +1,4 @@
-import { test, expect, signIn, password, capture } from './fixtures'
+import { test, expect, signIn, password, capture, createCourse, headers } from './fixtures'
 
 test('settings sections have direct links, preserve input and keep provider credentials out of the overview', async ({ page, accounts }) => {
   await signIn(page, accounts.author)
@@ -146,4 +146,57 @@ test('course access is explicit at creation, and search includes an empty course
   await page.getByRole('button',{name:'Принять приглашение'}).click()
   await expect(page.getByRole('heading',{name:title})).toBeVisible()
   await expect(page.getByRole('button',{name:'Действия категории',exact:true})).toHaveCount(0)
+})
+
+test('storage filters unused files and presents the editor quota without highlighting navigation', async ({ page, accounts }) => {
+  await signIn(page, accounts.author)
+  const courseId = await createCourse(page.request, 'Файлы для проверки')
+  const created = await page.request.post('/api/notes', { headers, data: { courseId, title: 'Заметка с изображением' } })
+  expect(created.status()).toBe(201)
+  const note = await created.json()
+  const upload = async (name: string) => {
+    const buffer = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from(name)])
+    const result = await page.request.post(`/api/notes/${note.id}/assets`, {
+      headers, multipart: { file: { name, mimeType: 'image/png', buffer } },
+    })
+    expect(result.status()).toBe(201)
+    return (await result.json()).url
+  }
+  const linked = await upload('linked.png')
+  await upload('unused.png')
+  expect((await page.request.patch(`/api/notes/${note.id}`, {
+    headers, data: { title: note.title, revision: note.revision, markdown: `![Схема](${linked})` },
+  })).ok()).toBe(true)
+
+  await page.goto('/settings?course=' + courseId + '#storage')
+  const accountLink = page.locator('.desktop-sidebar .account-trigger')
+  await expect(accountLink).toHaveAttribute('aria-current', 'page')
+  await expect(accountLink).not.toHaveClass(/\bactive\b/)
+  const files = page.locator('.storage-files')
+  await expect(files.getByRole('listitem')).toHaveCount(2)
+  const linkedFile = files.getByRole('listitem').filter({ hasText: 'linked.png' })
+  await linkedFile.getByText('Где используется', { exact: true }).click()
+  await expect(linkedFile.getByRole('link', { name: note.title })).toHaveAttribute('href', '/notes/' + note.id)
+  await page.getByRole('combobox', { name: 'Использование' }).selectOption({ label: 'Без заметок и заданий' })
+  await expect(files.getByRole('listitem')).toHaveCount(1)
+  await expect(files.getByRole('listitem')).toContainText('unused.png')
+  await expect(files.getByText('Где используется', { exact: true })).toHaveCount(0)
+  await page.getByRole('combobox', { name: 'Использование' }).selectOption({ label: 'Все файлы' })
+  await expect(files.getByRole('listitem')).toHaveCount(2)
+
+  const quota = page.getByRole('spinbutton', { name: /Лимит для редакторов/ })
+  const save = page.getByRole('button', { name: 'Сохранить лимит' })
+  await expect(quota).toHaveAccessibleDescription('До 256 МБ на загрузки')
+  await quota.fill('0')
+  await save.click()
+  await expect(quota).toHaveAccessibleDescription('Загрузки отключены')
+  await quota.fill('25')
+  await save.click()
+  await expect(quota).toHaveAccessibleDescription('До 256 МБ на загрузки')
+
+  await page.getByRole('button', { name: 'Скрыть проводник' }).click()
+  const railLink = page.locator('.rail-settings')
+  await expect(railLink).toBeVisible()
+  await expect(railLink).toHaveAttribute('aria-current', 'page')
+  await expect(railLink).not.toHaveClass(/\bactive\b/)
 })

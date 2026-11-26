@@ -7,6 +7,7 @@ import { library, useSession } from '../data/store'
 import { Button } from './ui/button'
 import { Dialog } from './ui/dialog'
 import { ActionMenu, openRowActions } from './ui/action-menu'
+import { CategoryDropArea, noteDragType, useNoteMove } from './note-move'
 
 const symbols = {
   folder: [Folder, 'Папка'], book: [BookOpen, 'Книга'], code: [Code, 'Код'],
@@ -46,11 +47,21 @@ export function IconPicker({ course, path = '' }: { course: Course; path?: strin
   </>
 }
 
-type NoteActionsProps = { note: Note; course: Course; paths: string[]; children: ReactNode; tableRow?: boolean }
+type NoteActionsProps = { note: Note; course: Course; children: ReactNode; tableRow?: boolean }
 
-export function NoteActions({ note, course, paths, children, tableRow }: NoteActionsProps) {
-  const [move, setMove] = useState(false)
-  const [path, setPath] = useState('')
+export function NoteExportLinks({ id }: { id: string }) {
+  const url = `/api/notes/${id}/export`
+  return <>
+    <Button asChild variant="ghost" size="sm"><a download href={url}>Скачать Markdown</a></Button>
+    <Button asChild variant="ghost" size="sm"><a download href={url + '?format=zip'}>Markdown с файлами (.zip)</a></Button>
+  </>
+}
+
+export function NoteActions({ note, course, children, tableRow }: NoteActionsProps) {
+  const mover = useNoteMove()
+  const current = [course.id, note.category].filter(Boolean).join('/')
+  const [moveOpen, setMoveOpen] = useState(false)
+  const [destination, setDestination] = useState(current)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const inputId = useId()
@@ -58,15 +69,20 @@ export function NoteActions({ note, course, paths, children, tableRow }: NoteAct
   const location = useLocation()
   const session = useSession()
   const writable = course.role === 'owner' || course.role === 'editor'
+  const destinations = mover.courses.filter(target => mover.canMove(note, target))
+  const canMove = destinations.some(target => target.id !== course.id || note.category || target.folders?.length)
   const url = `/notes/${note.id}`
 
-  function chooseCategory() { setPath(note.category || ''); setError(''); setMove(true) }
+  function chooseCategory() { setDestination(current); setError(''); setMoveOpen(true) }
   async function saveCategory(event: FormEvent) {
     event.preventDefault()
     setSaving(true)
     try {
-      await library.moveNote(note.id, path)
-      setMove(false)
+      const [id, ...parts] = destination.split('/')
+      const target = destinations.find(item => item.id === id)
+      if (!target) throw new Error('Категория назначения недоступна.')
+      await mover.move(note, target, parts.join('/'))
+      setMoveOpen(false)
     } catch (e) { setError((e as Error).message) }
     finally { setSaving(false) }
   }
@@ -79,6 +95,15 @@ export function NoteActions({ note, course, paths, children, tableRow }: NoteAct
   }
 
   return <div className={`note-actions-row${tableRow ? ' note-list-row' : ''}`} role={tableRow ? 'row' : undefined}
+    draggable={canMove} onDragStart={event => {
+      if (!canMove || (event.target as Element).closest('.note-menu-cell, [role=dialog]')) {
+        event.preventDefault()
+        return
+      }
+      event.dataTransfer.setData(noteDragType, note.id)
+      event.dataTransfer.effectAllowed = 'move'
+      mover.setDragged(note)
+    }} onDragEnd={() => mover.setDragged(undefined)}
     onContextMenu={event => {
       if ((event.target as Element).closest('[role=dialog]')) return
       event.preventDefault()
@@ -95,20 +120,19 @@ export function NoteActions({ note, course, paths, children, tableRow }: NoteAct
       <ActionMenu label={`Действия заметки «${note.title}»`}>
         <Button asChild variant="ghost" size="sm"><Link to={url}>Открыть</Link></Button>
         {writable && <Button asChild variant="ghost" size="sm"><Link to={url + '/edit'}>Редактировать</Link></Button>}
-        <Button asChild variant="ghost" size="sm"><a download href={'/api' + url + '/export'}>Скачать Markdown</a></Button>
-        {writable && <Button variant="ghost" size="sm" onClick={chooseCategory}>Переместить в категорию</Button>}
+        <NoteExportLinks id={note.id}/>
+        {canMove && <Button variant="ghost" size="sm" onClick={chooseCategory}>Переместить в категорию</Button>}
         {canDeleteNote(course, note, session.user?.id) && <Button variant="ghost" size="sm" className="danger-action" onClick={() => void deleteNote()}>Удалить заметку</Button>}
       </ActionMenu>
     </div>
-    {move && <Dialog open={move} onOpenChange={setMove} title="Категория заметки" description={note.title}>
+    {moveOpen && <Dialog open={moveOpen} onOpenChange={open => { if (!saving) setMoveOpen(open) }} title="Переместить заметку" description={note.title}>
       <form onSubmit={saveCategory}>
         <label className="field-label" htmlFor={inputId}>Куда переместить</label>
-        <select id={inputId} value={path} onChange={e => setPath(e.target.value)}>
-          <option value="">{course.title}</option>
-          {paths.map(p => <option key={p} value={p}>{[course.title, ...p.split('/')].join(' › ')}</option>)}
+        <select id={inputId} value={destination} onChange={e => setDestination(e.target.value)}>
+          <CategoryOptions courses={destinations}/>
         </select>
         {error && <p className="field-error" role="alert">{error}</p>}
-        <div className="dialog-actions"><Button type="submit" disabled={saving}>Сохранить</Button></div>
+        <div className="dialog-actions"><Button type="button" variant="ghost" disabled={saving} onClick={() => setMoveOpen(false)}>Отмена</Button><Button type="submit" disabled={saving || destination === current}>Переместить</Button></div>
       </form>
     </Dialog>}
   </div>
@@ -135,10 +159,13 @@ export type ManageCategory = (course: Course, path: string, action: CategoryActi
 export function CategoryMenu({ course, path = '', label, manage, children }: {
   course: Course; path?: string; label: string; manage: ManageCategory; children?: ReactNode
 }) {
+  const mover = useNoteMove()
   return <ActionMenu label={label}>
     {children}
     {course.role === 'owner' && <>
       <Button size="sm" variant="ghost" onClick={() => manage(course,path,'rename')}>Переименовать</Button>
+      {mover.canRelocate({ course, path }) &&
+        <Button size="sm" variant="ghost" onClick={() => mover.chooseCategory({ course, path })}>Переместить категорию</Button>}
       {path
         ? <Button size="sm" variant="ghost" onClick={() => manage(course,path,'remove-level')}>Объединить с родителем</Button>
         : <Button size="sm" variant="ghost" className="danger-action" onClick={() => manage(course,path,'delete')}>Удалить категорию</Button>}
@@ -152,13 +179,13 @@ export function DirectoryRow({ course, path = '', count, manage, startNew, addFo
 }) {
   const name = path.split('/').at(-1) || course.title
   return <div className="directory-row">
-    <div className="directory-title" onContextMenu={event => {
+    <CategoryDropArea course={course} path={path} className="directory-title" onContextMenu={event => {
       event.preventDefault()
       openRowActions(event.currentTarget, {x:event.clientX, y:event.clientY})
     }} onKeyDown={event => {
       if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {event.preventDefault(); openRowActions(event.currentTarget)}
     }}>
-      <Link to={folderLink(course.id,path)}><span className="folder-symbol"><CourseIcon course={course} path={path}/></span><strong>{name}</strong></Link>
+      <Link draggable={false} to={folderLink(course.id,path)}><span className="folder-symbol"><CourseIcon course={course} path={path}/></span><strong>{name}</strong></Link>
       <span>{plural(count,['заметка','заметки','заметок'])}</span>
       <CategoryMenu label={'Действия: ' + name} course={course} path={path} manage={manage}>
         <Button asChild size="sm" variant="ghost"><Link to={folderLink(course.id,path)}>Открыть категорию</Link></Button>
@@ -167,7 +194,7 @@ export function DirectoryRow({ course, path = '', count, manage, startNew, addFo
           {path.split('/').length < 6 && <Button size="sm" variant="ghost" onClick={() => addFolder(course,path)}>Создать подкатегорию</Button>}
         </>}
       </CategoryMenu>
-    </div>
+    </CategoryDropArea>
     {children}
   </div>
 }
@@ -186,14 +213,14 @@ function FolderBranch({ course, notes, search, selected, addFolder, startNew, ma
   const name = path.split('/').at(-1)!
   const current = location.pathname === '/courses/' + course.id && selected === path
   return <div className="folder-branch">
-    <div className={`course-tree-row ${current ? 'is-current' : ''}`} onContextMenu={event => {
+    <CategoryDropArea course={course} path={path} onExpand={() => setOpened(true)} className={`course-tree-row ${current ? 'is-current' : ''}`} onContextMenu={event => {
       event.preventDefault()
       openRowActions(event.currentTarget, {x:event.clientX,y:event.clientY})
     }} onKeyDown={event => {
       if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); openRowActions(event.currentTarget) }
     }}>
       <button className="tree-toggle" aria-label={(expanded ? 'Свернуть ' : 'Развернуть ') + name} aria-expanded={expanded} onClick={() => setOpened(!opened)}>{expanded ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}</button>
-      <Link to={folderLink(course.id,path)} className="course-tree-link" aria-current={current ? 'page' : undefined} title={name}><CourseIcon course={course} path={path} open={expanded}/><span>{name}</span></Link>
+      <Link draggable={false} to={folderLink(course.id,path)} className="course-tree-link" aria-current={current ? 'page' : undefined} title={name}><CourseIcon course={course} path={path} open={expanded}/><span>{name}</span></Link>
       <CategoryMenu label={'Действия: ' + name} course={course} path={path} manage={manage}>
         <Button asChild size="sm" variant="ghost"><Link to={folderLink(course.id,path)}>Открыть категорию</Link></Button>
         {course.role !== 'viewer' && <>
@@ -201,7 +228,7 @@ function FolderBranch({ course, notes, search, selected, addFolder, startNew, ma
           {path.split('/').length < 6 && <Button size="sm" variant="ghost" onClick={() => addFolder(course,path)}>Создать подкатегорию</Button>}
         </>}
       </CategoryMenu>
-    </div>
+    </CategoryDropArea>
     {expanded && <div className="tree-children"><NoteBranches course={course} notes={notes} search={search} selected={selected} addFolder={addFolder} startNew={startNew} manage={manage} parent={path}/></div>}
   </div>
 }
@@ -213,8 +240,8 @@ export function NoteBranches(props: BranchProps & { parent?: string }) {
     notes.some(n => n.category === path || n.category?.startsWith(path + '/')))
   const leaves = notes.filter(n => (n.category || '') === parent)
   return <>{folders.map(path => <FolderBranch key={path} {...props} path={path}/>)}
-    {leaves.map(note => <NoteActions key={note.id} note={note} course={course} paths={course.folders ?? []}>
-      <NavLink title={note.title} to={'/notes/' + note.id}><FileText size={13}/><span>{note.title}</span></NavLink>
+    {leaves.map(note => <NoteActions key={note.id} note={note} course={course}>
+      <NavLink draggable={false} title={note.title} to={'/notes/' + note.id}><FileText size={13}/><span>{note.title}</span></NavLink>
     </NoteActions>)}
     {!leaves.length && !folders.length && <span className="tree-empty-note">Пусто</span>}
   </>

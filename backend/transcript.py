@@ -1,5 +1,9 @@
-"""Conservative cleanup of Whisper subtitle artifacts and repetition loops."""
+"""Bounds and cleanup for speech transcription."""
 import re
+
+MAX_VIDEO_SECONDS = 3 * 3600
+AUDIO_NORMALIZATION_TIMEOUT = 450
+SPEECH_RECOGNITION_TIMEOUT = 5400
 
 
 def normalized(line):

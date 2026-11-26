@@ -7,7 +7,7 @@ export function ReaderOverflow({ children, content }: { children: ReactNode; con
     const host = root.current!
     let frame = 0
     let disposed = false
-    const tracked = new Map<HTMLElement, { cleanup: () => void; setOverflow: (value: boolean) => void }>()
+    const tracked = new Map<HTMLElement, { cleanup: () => void; measure: () => void }>()
     const restore = (element: HTMLElement, name: string, value: string | null) => {
       if (value === null) element.removeAttribute(name)
       else element.setAttribute(name, value)
@@ -15,7 +15,7 @@ export function ReaderOverflow({ children, content }: { children: ReactNode; con
     const refresh = () => {
       for (const [element, observer] of tracked) {
         if (!host.contains(element)) { observer.cleanup(); tracked.delete(element); continue }
-        observer.setOverflow(element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1)
+        observer.measure()
       }
     }
     const schedule = () => {
@@ -30,7 +30,8 @@ export function ReaderOverflow({ children, content }: { children: ReactNode; con
         const original = ['role', 'aria-label', 'tabindex'].map(name => element.getAttribute(name))
         const fit = () => ['role', 'aria-label', 'tabindex'].forEach((name, index) => restore(element, name, original[index]))
         const kind = element.classList.contains('table-container') ? 'Таблица' : ['PRE', 'CODE'].includes(element.tagName) ? 'Код' : 'Формула'
-        const child = element.firstElementChild
+        const inlineFormula = element.matches('.katex') ? element.querySelector('.katex-html') : null
+        const child = inlineFormula ?? element.firstElementChild
         const setOverflow = (value: boolean) => {
           if (value === element.hasAttribute('data-horizontal-scroll')) return
           element.toggleAttribute('data-horizontal-scroll', value)
@@ -50,7 +51,11 @@ export function ReaderOverflow({ children, content }: { children: ReactNode; con
         element.addEventListener('keydown', key)
         resize.observe(element)
         if (child) resize.observe(child)
-        tracked.set(element, { setOverflow, cleanup() {
+        tracked.set(element, { measure() {
+          // KaTeX glyphs may extend beyond the measured formula without needing a scroll area.
+          const width = inlineFormula?.getBoundingClientRect().width ?? element.scrollWidth
+          setOverflow(element.clientWidth > 0 && width > element.clientWidth + 1)
+        }, cleanup() {
           setOverflow(false)
           element.removeEventListener('keydown', key)
           resize.unobserve(element)

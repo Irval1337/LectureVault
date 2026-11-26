@@ -18,6 +18,7 @@ DETAILED_GENERATION_SECONDS = 1800
 DETAILED_REQUIRED_TOKEN_BUDGET = 50_000
 MAX_SLIDE_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_SLIDE_IMAGES = 16
+SLIDE_ANALYSIS_TIMEOUT = 600
 
 def valid_api_key(provider, key):
     if not isinstance(key, str) or len(key) > 512:

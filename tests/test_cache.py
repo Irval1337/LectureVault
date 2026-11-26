@@ -29,6 +29,82 @@ def submit(client, course_id, language='ru', video=VIDEO, pdf=PDF):
     return response.json()['id']
 
 
+def test_moving_a_generated_note_keeps_its_sources_and_the_original_job_references(env, monkeypatch):
+    client, settings, _, _ = env
+    source = course(client, title='Исходный курс')
+    target = course(client, title='Новый курс')
+
+    def rpc(_settings, _service, endpoint, _body, **_kwargs):
+        return {
+            '/providers/status': {'providers': [{'id': 'openai', 'connected': True}]},
+            '/transcribe': {'text': 'Full lecture transcript'},
+            '/slides': {'text': '[Слайд 1] Diagram', 'pages': 1},
+            '/slide-preview': {'jpeg': '/9j/2Q=='},
+            '/generate': {'markdown': '## Notes\n\nExplanation.\n\n[[slide:1]]'},
+        }[endpoint]
+
+    monkeypatch.setattr(worker, 'rpc', rpc)
+    first_id = submit(client, source)
+    worker.run_job(settings, worker.claim(settings))
+    first = client.get('/api/jobs/' + first_id).raise_for_status().json()
+    metadata = dict(courseId=source, title='Other note', provider='openai', model='test', reuseJobId=first_id)
+    second_id = client.post('/api/jobs', data={'metadata': json.dumps(metadata)}).raise_for_status().json()['id']
+    worker.run_job(settings, worker.claim(settings))
+    second = client.get('/api/jobs/' + second_id).raise_for_status().json()
+    assert first['pdfAssetId'] == second['pdfAssetId'] and first['transcriptAssetId'] == second['transcriptAssetId']
+
+    note_route = '/api/notes/' + first['noteId']
+    client.put(note_route + '/category', json={'courseId': target, 'path': ''}).raise_for_status()
+    moved = client.get('/api/jobs/' + first_id).raise_for_status().json()
+    assert moved['courseId'] == target and moved['noteId'] == first['noteId']
+    assert moved['pdfAssetId'] != first['pdfAssetId'] and moved['transcriptAssetId'] != first['transcriptAssetId']
+    assert f'/api/assets/{moved["pdfAssetId"]}/slides/1.jpg' in client.get(note_route).json()['markdown']
+    assert client.get(f'/api/assets/{moved["pdfAssetId"]}/slides/1.jpg').content == b'\xff\xd8\xff\xd9'
+    assert client.get('/api/assets/' + moved['transcriptAssetId']).text == 'Full lecture transcript'
+    assert client.get('/api/jobs/' + second_id).json()['pdfAssetId'] == first['pdfAssetId']
+    assert client.get('/api/assets/' + first['transcriptAssetId']).text == 'Full lecture transcript'
+    with connect(settings) as db:
+        assert db.execute('SELECT count(DISTINCT path),count(*) FROM assets').fetchone()[:] == (2, 4)
+
+
+def test_slide_analysis_timeout_keeps_the_transcript_and_processed_pages(env, monkeypatch):
+    client, settings, _, _ = env
+    course_id = course(client)
+    batches = []
+    requests = []
+
+    def rpc(_settings, _service, endpoint, body, **kwargs):
+        if endpoint == '/providers/status':
+            return {'providers': [{'id': 'openai', 'connected': True, 'models': [
+                {'id': 'test', 'supportsImages': True, 'efforts': []}]}]}
+        if endpoint == '/transcribe':
+            return {'text': 'Full lecture transcript'}
+        if endpoint == '/slides':
+            return {'text': '[Слайд 33] Last page still has PDF text', 'pages': 33}
+        if endpoint == '/slide-preview':
+            return {'jpeg': '/9j/2Q=='}
+        if endpoint == '/describe-slides':
+            assert kwargs['timeout'] > 600
+            batches.append([image['page'] for image in body['slideImages']])
+            if len(batches) == 2:
+                raise worker.JobError('TIMEOUT', 'Timed out describing slides')
+            return {'slides': '[Слайд 1] Diagram from the first batch'}
+        assert endpoint == '/generate'
+        requests.append(body)
+        return {'markdown': '## Lecture\n\nDetailed notes.'}
+
+    monkeypatch.setattr(worker, 'rpc', rpc)
+    job_id = submit(client, course_id)
+    worker.run_recognition(settings, worker.claim(settings, 'speech'))
+    worker.run_job(settings, worker.claim(settings, 'generation'))
+    result = client.get('/api/jobs/' + job_id).raise_for_status().json()
+    assert result['status'] == 'ready' and result['slidesPartial']
+    assert result['pdfAssetId'] and result['transcriptAssetId']
+    assert batches == [list(range(1, 17)), list(range(17, 33))]
+    assert requests[0]['slideImages'] == []
+    assert requests[0]['slides'] == '[Слайд 33] Last page still has PDF text\n\n[Слайд 1] Diagram from the first batch'
+
+
 def test_cached_real_media_survives_retry_and_restart_and_respects_acl(env, monkeypatch, tmp_path):
     client, settings, _, _ = env
     cid = course(client)

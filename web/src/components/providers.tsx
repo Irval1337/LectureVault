@@ -15,7 +15,7 @@ const endpointNames = ['OpenAI', 'Anthropic', 'Gemini', 'Ollama']
 
 export function ProviderConnections({ small = false, account = false }: { small?: boolean; connectProvider?: Provider['id']; account?: boolean }) {
   const session = useSession()
-  return <NavLink className={small ? 'inline-action' : 'help-link account-trigger'} to={account ? '/settings' : '/settings#connections'} title={account ? 'Настройки аккаунта' : undefined}>
+  return <NavLink className={() => small ? 'inline-action' : 'help-link account-trigger'} to={account ? '/settings' : '/settings#connections'} title={account ? 'Настройки аккаунта' : undefined}>
     {account ? <><span className="account-name">{session.user?.name}</span><Settings2 size={15} aria-hidden="true" /><span className="sr-only">Настройки</span></> : 'Настроить подключения'}
   </NavLink>
 }

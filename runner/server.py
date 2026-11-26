@@ -25,6 +25,10 @@ WHISPER_MODEL = os.environ.get('WHISPER_MODEL', '/opt/models/ggml-base.bin')
 WHISPER_VAD = '/opt/models/ggml-silero-v5.1.2.bin'
 MAX_TRANSCRIPT_CHARS = 1_000_000
 MAX_TRANSCRIPT_BYTES = MAX_TRANSCRIPT_CHARS * 4
+PCM_SAMPLE_RATE = 16000
+MAX_PCM_FRAMES = transcription.MAX_VIDEO_SECONDS * PCM_SAMPLE_RATE
+
+
 @asynccontextmanager
 async def lifespan(_app):
     from .sandbox import abi
@@ -42,13 +46,15 @@ async def lifespan(_app):
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
 media_lock = threading.Lock()
 
-def run(argv, *, cwd, timeout, on_progress=None, read_file=None, output_limit=1_000_000):
+def run(argv, *, cwd, timeout, on_progress=None, read_file=None, output_limit=1_000_000, file_size_limit=None):
     # Media parsers see one job only, not the other users' uploaded files.
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         home, temporary = root / 'home', root / 'tmp'
         home.mkdir(); temporary.mkdir()
         command = [sys.executable, '-m', 'runner.sandbox', str(home), str(cwd), str(temporary)]
+        if file_size_limit is not None:
+            command.extend(['--file-size-limit', str(file_size_limit)])
         if read_file:
             command.extend(['--read-file', str(read_file)])
         command.extend(argv)
@@ -171,11 +177,13 @@ def transcribe(body: MediaInput):
 def normalize_audio(directory, video, audio):
     info = json.loads(run(['ffprobe', '-v', 'error', '-protocol_whitelist', 'file,pipe', '-show_entries', 'format=duration', '-of', 'json', str(video)], cwd=directory, timeout=30, read_file=video))
     duration = float(info.get('format', {}).get('duration', 0))
-    if not 0 < duration <= 7200:
-        fail('DURATION_LIMIT', 'Допустимо видео с длительностью до двух часов.')
+    if not 0 < duration <= transcription.MAX_VIDEO_SECONDS:
+        fail('DURATION_LIMIT', 'Допустимо видео с длительностью до трёх часов.')
     run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-protocol_whitelist', 'file,pipe',
-         '-i', str(video), '-map', '0:a:0', '-map_metadata', '-1', '-vn', '-ac', '1', '-ar', '16000',
-         '-c:a', 'pcm_s16le', '-t', '7200', str(audio)], cwd=directory, timeout=300, read_file=video)
+         '-i', str(video), '-map', '0:a:0', '-map_metadata', '-1', '-vn', '-ac', '1', '-ar', str(PCM_SAMPLE_RATE),
+         '-c:a', 'pcm_s16le', '-t', str(transcription.MAX_VIDEO_SECONDS), str(audio)],
+        cwd=directory, timeout=transcription.AUDIO_NORMALIZATION_TIMEOUT, read_file=video,
+        file_size_limit=2 * MAX_PCM_FRAMES + 4096)  # Two bytes per sample plus the WAV header.
     return duration
 
 
@@ -186,8 +194,8 @@ def pcm_identity(audio):
     try:
         with wave.open(str(audio), 'rb') as stream:
             frames = stream.getnframes()
-            if ((stream.getnchannels(), stream.getframerate(), stream.getsampwidth()) != (1, 16000, 2)
-                    or not 0 < frames <= 7200 * 16000):
+            if ((stream.getnchannels(), stream.getframerate(), stream.getsampwidth()) != (1, PCM_SAMPLE_RATE, 2)
+                    or not 0 < frames <= MAX_PCM_FRAMES):
                 fail('INVALID_AUDIO', 'Не удалось подготовить звуковую дорожку.')
             remaining = frames
             while remaining:
@@ -198,7 +206,7 @@ def pcm_identity(audio):
                 remaining -= len(chunk) // 2
     except (wave.Error, EOFError, OSError):
         fail('INVALID_AUDIO', 'Не удалось прочитать звуковую дорожку.')
-    return digest.hexdigest(), frames / 16000
+    return digest.hexdigest(), frames / PCM_SAMPLE_RATE
 
 
 def recognize(body, directory, audio):
@@ -214,7 +222,8 @@ def recognize(body, directory, audio):
     progress(0)
     run(['/opt/whisper/bin/whisper-cli', '-m', WHISPER_MODEL, '--vad', '--vad-model', WHISPER_VAD,
          '--vad-speech-pad-ms', '200', '--max-context', '0', '-f', str(audio), '-l', language,
-         '-t', '4', '-ng', '-pp', '-otxt', '-of', str(result)], cwd=directory, timeout=3600, on_progress=progress)
+         '-t', '4', '-ng', '-pp', '-otxt', '-of', str(result)],
+        cwd=directory, timeout=transcription.SPEECH_RECOGNITION_TIMEOUT, on_progress=progress)
     # Whisper writes no output when the VAD finds no speech at all.
     if not output.exists() and not output.is_symlink():
         fail('NO_SPEECH', 'Whisper не обнаружил речи. Проверьте звуковую дорожку.')
@@ -247,7 +256,7 @@ def extract_slides(_body, directory, pdf):
     pages = pdf_pages(directory, pdf)
     limit = 4_000_000
     text = run(['pdftotext', '-f', '1', '-l', str(pages), '-layout', str(pdf), '-'],
-               cwd=directory, timeout=60, read_file=pdf, output_limit=limit + 1)
+               cwd=directory, timeout=180, read_file=pdf, output_limit=limit + 1)
     if len(text.encode('utf-8')) > limit:
         fail('PDF_TEXT_LIMIT', 'Текст презентации превышает 4 МБ. Разделите PDF на части.')
     return {'text': '\n\n'.join(f'[Слайд {i}] {page.strip()}'
@@ -256,7 +265,7 @@ def extract_slides(_body, directory, pdf):
 
 
 def pdf_pages(directory, pdf):
-    info = run(['pdfinfo', str(pdf)], cwd=directory, timeout=20, read_file=pdf)
+    info = run(['pdfinfo', str(pdf)], cwd=directory, timeout=30, read_file=pdf)
     match = re.search(r'^Pages:\s+(\d+)', info, re.M)
     if not match or not 1 <= int(match.group(1)) <= 500:
         fail('PDF_PAGE_LIMIT', 'Не удалось прочитать число страниц PDF, либо презентация превышает 500 страниц.')
@@ -278,7 +287,7 @@ def slide_jpeg(directory, pdf, page):
     with tempfile.TemporaryDirectory(dir=directory) as temp:
         target = Path(temp) / 'page'
         run(['pdftoppm', '-f', str(page), '-l', str(page), '-singlefile', '-scale-to', '1250',
-             '-jpeg', '-jpegopt', 'quality=80', str(pdf), str(target)], cwd=directory, timeout=25, read_file=pdf)
+             '-jpeg', '-jpegopt', 'quality=80', str(pdf), str(target)], cwd=directory, timeout=60, read_file=pdf)
         image = target.with_suffix('.jpg')
         if image.is_symlink() or not image.is_file() or image.stat().st_size > 2_000_000:
             fail('PDF_PREVIEW', 'Не удалось показать страницу PDF.')

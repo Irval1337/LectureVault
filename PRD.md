@@ -37,7 +37,7 @@ React/TypeScript/Vite, оригинальные Quartz5 ContentBody/TOC чере
 
 ## Лимиты и границы
 
-Видео512МБ/2ч, PDF50МБ/500стр; PNG/JPEG/WebP10МБ, SVG upload запрещён. Транскрипт140000символов, для длинных PDF в модель передаются выдержки до 40000 символов. Assets1ГБ на владельца категории/10ГБ экземпляра,100 корневых категорий/5000заметок/25МБ Markdown на владельца;10активных/30новыхзаданий в сутки на отправителя. Изображения/источники выдаются через ACL API. Exact Origin/Host, CSRF header, rate limits, Argon2id, HTTPS/Secure cookie для production, SMTP TLS, encrypted secrets/outbox.
+Видео512МБ/3ч, PDF50МБ/500стр; PNG/JPEG/WebP10МБ, SVG upload запрещён. Транскрипт140000символов, для длинных PDF в модель передаются выдержки до 40000 символов. Assets1ГБ на владельца категории/10ГБ экземпляра,100 корневых категорий/5000заметок/25МБ Markdown на владельца;10активных/30новыхзаданий в сутки на отправителя. Изображения/источники выдаются через ACL API. Exact Origin/Host, CSRF header, rate limits, Argon2id, HTTPS/Secure cookie для production, SMTP TLS, encrypted secrets/outbox.
 
 Не входят: произвольные URL/yt-dlp (SSRF-путь закрыт), OCR, PPTX, CUDA без runtime, realtime, SSO, граф, вложенные папки, весь Obsidian vault, public/unlisted документы и Quartz publishing. Ничего не меняет konspekt/hse-notes/Obsidian/host CLI. Нет автопубликации и Git push. Mock существует только в изолированных LV_ENV=test проверках, не в рабочем сервисе.
 

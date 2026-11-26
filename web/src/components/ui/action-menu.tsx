@@ -28,7 +28,9 @@ export function openRowActions(row: HTMLElement, point?: Point) {
   else root.open = true
 }
 
-export function ActionMenu({ label, children }: { label: string; children: ReactNode }) {
+export function ActionMenu({ label, children, trigger, className = '' }: {
+  label: string; children: ReactNode; trigger?: ReactNode; className?: string
+}) {
   const ref = useRef<HTMLDetailsElement>(null)
   const [open, setOpen] = useState(false)
   useEffect(() => {
@@ -52,7 +54,7 @@ export function ActionMenu({ label, children }: { label: string; children: React
       window.removeEventListener('resize', close)
     }
   }, [open])
-  return <details ref={ref} className="action-menu" onKeyDown={event => {
+  return <details ref={ref} className={`action-menu ${className}`} onKeyDown={event => {
     if (event.key === 'Escape' && event.currentTarget.open) {
       event.preventDefault()
       event.stopPropagation()
@@ -74,7 +76,7 @@ export function ActionMenu({ label, children }: { label: string; children: React
       root.open = !root.open
       if (root.open) positionMenu(root)
       else root.querySelector<HTMLElement>('[popover]')?.hidePopover?.()
-    }}><MoreHorizontal size={18}/></summary>
+    }}>{trigger ?? <MoreHorizontal size={18}/>}</summary>
     <div popover="manual" className="action-menu-popover" onClick={event => {
       if ((event.target as HTMLElement).closest('button, a') && ref.current) {
         ref.current.open = false

@@ -110,6 +110,8 @@ def request(config, endpoint, payload=None, *, detailed=False, timeout=None):
         if not isinstance(result, dict):
             raise ValueError()
         return result
+    except httpx.TimeoutException:
+        fail('API_TIMEOUT', 'Истекло время ожидания ответа API.')
     except (httpx.RequestError, OSError, ValueError):
         fail('API_UNAVAILABLE', 'Не удалось получить ответ API. Проверьте адрес и доступность сервера.')
 

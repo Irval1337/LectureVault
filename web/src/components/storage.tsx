@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { Download, FileText, Image, Video } from 'lucide-react'
 import { api } from '../data/api'
-import { library } from '../data/store'
-import { reuseMaterialsUrl } from '../data/model'
+import { library, useLibrary } from '../data/store'
+import { reuseMaterialsUrl, type Job, type Note } from '../data/model'
 import { Button } from './ui/button'
 import { Dialog } from './ui/dialog'
 import { ProgressMeter } from './ui/progress-meter'
@@ -18,6 +18,7 @@ type Item = {
   conversion?: 'queued' | 'processing' | 'failed'; conversionError?: string
 }
 type Storage = { limit: number; used: number; temporary: number; reserved: number; items: Item[]; groups: string[][]; editorPercent: number; editorUsed: number }
+type FileUse = { url: string; title: string; detail?: string }
 
 const kinds = { video: 'Видео', pdf: 'Презентации', transcript: 'Расшифровки', image: 'Изображения' }
 const amount = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 })
@@ -27,7 +28,31 @@ function fileSize(bytes: number) {
   return amount.format(bytes / unit[0]) + ' ' + unit[1]
 }
 
+function fileUses(group: Item[], notes: ReadonlyMap<string, Note>, jobs: ReadonlyMap<string, Job>) {
+  const uses = new Map<string, FileUse>()
+  const addNote = (id: string, historical = false) => {
+    const note = notes.get(id)
+    const url = '/notes/' + id
+    if (note && (!historical || !uses.has(url))) {
+      uses.set(url, { url, title: note.title, detail: historical ? 'Предыдущая версия' : undefined })
+    }
+  }
+  for (const item of group) {
+    for (const note of item.notes) addNote(note.id, note.historical)
+    for (const reference of item.jobs) {
+      const job = jobs.get(reference.id)
+      if (job?.noteId) addNote(job.noteId)
+      else if (job && job.status !== 'ready' && job.status !== 'cancelled') {
+        const url = '/queue?job=' + job.id
+        uses.set(url, { url, title: job.title, detail: 'Задание' })
+      }
+    }
+  }
+  return [...uses.values()]
+}
+
 export function StorageSettings() {
+  const { notes, jobs } = useLibrary()
   const [params] = useSearchParams()
   const navigate = useNavigate()
   const location = useLocation()
@@ -78,9 +103,13 @@ export function StorageSettings() {
 
   const courses = new Map(storage?.items.map(item => [item.courseId, item.courseTitle]))
   const byId = new Map(storage?.items.map(item => [item.id, item]))
-  const groups = storage?.groups.map(ids => ids.flatMap(id => byId.get(id) ?? [])).filter(group => group.length > 0 &&
-    (!course || group.some(item => item.courseId === course)) && (!kind || group[0].kind === kind) &&
-    (!unlinked || group.every(item => !item.inUse && !item.referenced && !item.jobs.length)))
+  const notesById = new Map(notes.map(note => [note.id, note]))
+  const jobsById = new Map(jobs.map(job => [job.id, job]))
+  const editorLimit = storage ? Math.floor(storage.limit * storage.editorPercent / 100) : 0
+  const groups = storage?.groups.map(ids => ids.flatMap(id => byId.get(id) ?? []))
+    .filter(group => group.length > 0 && (!course || group.some(item => item.courseId === course)) && (!kind || group[0].kind === kind))
+    .map(items => ({ items, uses: fileUses(items, notesById, jobsById) }))
+    .filter(({ items, uses }) => !unlinked || (!uses.length && items.every(item => !item.inUse && !item.referenced)))
   return <section className="settings-section storage-settings">
     <h2>Хранилище</h2>
     {error && !action && <p role="alert" className="field-error">{error} {!storage && <button type="button" className="inline-action" onClick={() => void load()}>Повторить</button>}</p>}
@@ -94,10 +123,23 @@ export function StorageSettings() {
         {storage.temporary > 0 && <p className="field-hint">Видео в обработке · {fileSize(storage.temporary)}</p>}
       </div>
       <p className="field-hint">Видео хранится во время распознавания. После обработки остаётся файл расшифровки.</p>
-      <form className="storage-filters storage-editor-limit" onSubmit={event => { event.preventDefault(); void saveEditorLimit() }}>
-        <label>Лимит редакторов, %<input type="number" min={0} max={100} value={editorPercent ?? storage.editorPercent} onChange={event => setEditorPercent(event.target.value)} /></label>
-        <span className="field-hint">{fileSize(storage.editorUsed)} из {fileSize(Math.floor(storage.limit * storage.editorPercent / 100))}</span>
-        <Button type="submit" size="sm" variant="outline" disabled={busy || !editorPercent || Number(editorPercent) === storage.editorPercent}>Сохранить лимит</Button>
+      <form className="storage-editor-limit" onSubmit={event => { event.preventDefault(); void saveEditorLimit() }}>
+        <div>
+          <label htmlFor="storage-editor-percent">Лимит для редакторов<span className="sr-only"> в процентах</span></label>
+          <p className="field-hint" id="storage-editor-usage">
+            {storage.editorUsed > 0 && `Занято ${fileSize(storage.editorUsed)} · `}
+            {editorLimit > 0 ? `До ${fileSize(editorLimit)} на загрузки` : 'Загрузки отключены'}
+          </p>
+        </div>
+        <div className="storage-limit-controls">
+          <div className="storage-percent-field">
+            <input id="storage-editor-percent" type="number" inputMode="numeric" min={0} max={100} aria-describedby="storage-editor-usage"
+              value={editorPercent ?? storage.editorPercent} onChange={event => setEditorPercent(event.target.value)} />
+            <span aria-hidden="true">%</span>
+          </div>
+          <Button type="submit" size="sm" variant="outline" aria-label="Сохранить лимит"
+            disabled={busy || !editorPercent || Number(editorPercent) === storage.editorPercent}>Сохранить</Button>
+        </div>
       </form>
       {(storage.items.length > 0 || course) && <div className="storage-filters">
         <label>Категория<select value={course} onChange={event => navigate({
@@ -108,31 +150,37 @@ export function StorageSettings() {
           {[...courses].map(([id, title]) => <option key={id} value={id}>{title}</option>)}
         </select></label>
         <label>Тип файла<select value={kind} onChange={event => setKind(event.target.value as Kind | '')}>
-          <option value="">Все файлы</option>
+          <option value="">Все типы</option>
           {Object.entries(kinds).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>
-        <label className="storage-unlinked"><input type="checkbox" checked={unlinked} onChange={event => setUnlinked(event.target.checked)}/>Без связей</label>
+        <label>Использование<select value={unlinked ? 'unlinked' : ''} onChange={event => setUnlinked(event.target.value === 'unlinked')}>
+          <option value="">Все файлы</option>
+          <option value="unlinked">Без заметок и заданий</option>
+        </select></label>
       </div>}
       {!groups?.length && <p className="field-hint">{storage.items.length ? 'По выбранным фильтрам файлов нет.' : 'В ваших категориях пока нет файлов.'}</p>}
       {groups && groups.length > 0 && <ul className="storage-files">
-        {groups.map(group => {
+        {groups.map(({ items: group, uses }) => {
           const item = group.find(reference => reference.courseId === course) ?? group[0]
           const copies = [item, ...group.filter(reference => reference.id !== item.id)]
+          const locations = new Map(copies.map(reference => [reference.courseId + '\n' + reference.name, reference]))
           const Icon = item.kind === 'video' ? Video : item.kind === 'image' ? Image : FileText
           const status = item.conversion === 'queued' ? 'В очереди на распознавание' : item.conversion === 'processing' ? 'Распознаём видео' :
-            item.temporary ? 'Временное видео' : item.referenced ? 'Используется в заметке' : item.inUse ? 'Используется в задании' : ''
+            item.temporary ? 'Временное видео' : ''
           return <li key={item.id}>
             <Icon size={18} aria-hidden="true" className="storage-file-icon"/>
             <div className="storage-file-info">
               <strong>{item.name}</strong>
-              <p>{fileSize(item.size)}</p>
-              <details className="storage-uses"><summary>Использование{group.length > 1 ? ` · ${group.length}` : ''}</summary>
-                {group.map(reference => <div key={reference.id}>
-                  <p><Link to={'/courses/' + reference.courseId}>{reference.courseTitle}</Link>{reference.name !== item.name ? ' · ' + reference.name : ''}</p>
-                  {reference.notes.map(note => <p key={note.id}><Link to={'/notes/' + note.id}>{note.title}</Link>{note.historical ? ' · Предыдущая версия' : ''}</p>)}
-                  {reference.jobs.map(job => <p key={job.id}><Link to={'/queue?job=' + job.id}>{job.title}</Link></p>)}
-                </div>)}
-              </details>
+              <p className="storage-file-location">{fileSize(item.size)}
+                {[...locations.values()].map(reference => <Fragment key={reference.id}>
+                  {' · '}<Link to={'/courses/' + reference.courseId}>{reference.courseTitle}</Link>
+                  {reference.name !== item.name && ` (${reference.name})`}
+                </Fragment>)}
+              </p>
+              {uses.length > 0 && <details className="storage-uses">
+                <summary>Где используется</summary>
+                <div>{uses.map(use => <p key={use.url}><Link to={use.url}>{use.title}</Link>{use.detail && ` · ${use.detail}`}</p>)}</div>
+              </details>}
               {status && <p>{status}</p>}
               {item.conversionError && <p className="field-error">{item.conversionError}</p>}
             </div>

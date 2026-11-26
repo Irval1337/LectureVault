@@ -80,7 +80,8 @@ test('registration and email verification → empty account → manual Note with
     await page.setViewportSize({ width, height: width === 1440 ? 1000 : 844 }); await capture(page, `reader-${width}`)
   }
   const download = page.waitForEvent('download')
-  await page.getByRole('link', { name: 'Скачать .md', exact: true }).click()
+  await page.getByLabel('Скачать заметку', { exact: true }).click()
+  await page.getByRole('link', { name: 'Скачать Markdown', exact: true }).click()
   expect(await readFile((await (await download).path())!, 'utf8')).toBe(note.markdown)
   await page.setViewportSize({ width: 1440, height: 1000 }); await page.goto('/')
   await capture(page, 'library-1440')

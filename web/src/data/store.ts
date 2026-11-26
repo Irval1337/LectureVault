@@ -43,7 +43,7 @@ async function refresh(force = false) {
           const cached = noteCache.get(note.id)
           const editing = window.location.pathname === `/notes/${note.id}/edit`
           if (cached && cached.revision !== note.revision && !editing) noteCache.delete(note.id)
-          return cached && (cached.revision === note.revision || editing) ? { ...cached, category: note.category } : note
+          return cached && (cached.revision === note.revision || editing) ? { ...cached, courseId: note.courseId, category: note.category } : note
         })
         for (const id of noteCache.keys()) if (!notes.some(note => note.id === id)) noteCache.delete(id)
         state = { ...state, ...payload, notes }; emit()
@@ -125,8 +125,8 @@ export const library = {
     }).catch(error => library.reportError(error)).finally(() => { noteRequests.delete(key) })
     noteRequests.set(key, request); return request
   },
-  async moveNote(id: string, path: string) {
-    await api(`/notes/${id}/category`, { method: 'PUT', body: JSON.stringify({ path, existingOnly: true }) })
+  async moveNote(id: string, courseId: string, path: string) {
+    await api(`/notes/${id}/category`, { method: 'PUT', body: JSON.stringify({ courseId, path, existingOnly: true }) })
     await refresh(true)
   },
   async setCourseIcon(id: string, icon: string, path = '') {
@@ -145,6 +145,16 @@ export const library = {
     const result = await api<{path: string}>(`/courses/${id}/folders`, {method: 'PATCH', body: JSON.stringify({path, operation, name})})
     await refresh(true)
     return result.path
+  },
+  async moveCategory(id: string, path: string, courseId: string | null, parent: string, confirmation?: string) {
+    const result = await api<{courseId: string; path: string}>(`/courses/${id}/location`, {
+      method: 'PUT', body: JSON.stringify({ path, courseId, parent, confirmation }),
+    })
+    await refresh(true)
+    const expandedCourses = state.expandedCourses.filter(course => path || course !== id)
+    state = { ...state, expandedCourses: [...new Set([...expandedCourses, result.courseId])] }
+    savePreferences()
+    return result
   },
   async createFolder(courseId: string, parent: string, name: string) {
     const result = await api<{path: string}>(`/courses/${courseId}/folders`, {method: 'POST', body: JSON.stringify({ parent, name })})
